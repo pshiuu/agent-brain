@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# brain-mem — read and write the brain's memory the way BRAIN.md says, from inside a phase.
+#
+#   brain-mem scope                          the tags you read, and the pages they cover (the apps' too)
+#   brain-mem search <word>...               lines in the pages of your scope, its apps' and your client's
+#   brain-mem page <name> --summary "<line>" [--tags "a, b"] < page.md
+#                                            write knowledge/<name>.md and file it in index.md
+#   brain-mem propose "[target] what — why"  append to ## Open in proposals.md
+#   brain-mem decide "<decision>" "<reason>" append to this project's decisions.md
+#   brain-mem check                          the memory lint; exit 1 on an error
+#
+# Every write is checked before it lands and refused with the reason, so a page is tagged,
+# indexed under its tags and sourced, a proposal is in the queue evolve reads, and a
+# decision has its date. Writing the files by hand still works; `check` and `brain lint`
+# catch what that gets wrong.
+set -euo pipefail
+
+_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SYS="${BRAIN_SYSTEM:-$(cd "$_here/../.." && pwd -P)}"
+MEM="${BRAIN_MEMORY:-$(cd "$SYS/../memory" && pwd -P)}"
+PROJECT="${BRAIN_PROJECT:-}"
+source "$_here/lib.sh"
+
+die() { echo "brain-mem: $*" >&2; exit 1; }
+need_project() { [ -n "$PROJECT" ] && [ -d "$MEM/projects/$PROJECT" ] || die "no project: BRAIN_PROJECT is '${PROJECT}' and memory/projects/ has no such folder"; }
+env_of() { awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); gsub(/^"|"$/, ""); print; exit }' "$MEM/projects/$PROJECT/project.env" 2>/dev/null; }
+project_ctx() {
+  PDIR="$MEM/projects/$PROJECT"; PLAYBOOK="$(env_of PLAYBOOK)"; CLIENT="$(env_of CLIENT)"
+  clients_on || CLIENT=""
+}
+
+# Agents of several projects write memory at once (BRAIN_MAX_PARALLEL), and index.md and
+# proposals.md are one file each. mkdir is atomic; a lock older than a minute is a crash.
+lock() {
+  local l="$MEM/.brain-mem.lock" n=0
+  until mkdir "$l" 2>/dev/null; do
+    n=$((n + 1))
+    if [ "$n" -gt 120 ]; then
+      [ -n "$(find "$l" -maxdepth 0 -mmin +1 2>/dev/null)" ] && { rmdir "$l" 2>/dev/null || true; continue; }
+      die "memory is locked by another writer ($l)"
+    fi
+    sleep 0.5
+  done
+  trap 'rmdir "$MEM/.brain-mem.lock" 2>/dev/null || true' EXIT
+}
+put() { local tmp="$1.brain-mem.$$"; cat > "$tmp" && mv "$tmp" "$1"; } # file < content
+
+in_scope() { # page scope -> true when one of the page's tags is in the scope
+  local t; for t in $(page_tags "$1"); do case " $2 " in *" $t "*) return 0 ;; esac; done; return 1
+}
+
+cmd_scope() {
+  need_project; project_ctx
+  local scope f d; scope="$(knowledge_scope)"
+  echo "Knowledge scope: $scope"
+  for f in "$MEM"/knowledge/*.md; do
+    [ -e "$f" ] && in_scope "$f" "$scope" || continue
+    printf '  knowledge/%s  [%s]  %s\n' "$(basename "$f")" "$(page_tags "$f" | paste -sd, -)" "$(head -1 "$f" | sed 's/^# *//')"
+  done
+  for d in $(app_knowledge "$scope"); do
+    for f in "$d"/*.md; do printf '  %s  [read-only, from the app]  %s\n' "$f" "$(head -1 "$f" | sed 's/^# *//')"; done
+  done
+  if [ -n "$CLIENT" ]; then
+    echo "Client: clients/$CLIENT/"
+    for f in "$MEM/clients/$CLIENT"/*.md; do [ -e "$f" ] && printf '  clients/%s/%s\n' "$CLIENT" "$(basename "$f")"; done
+  fi
+  return 0
+}
+
+cmd_search() {
+  [ $# -gt 0 ] || die "search what? brain-mem search <word>..."
+  need_project; project_ctx
+  local scope f d files=() w args=()
+  scope="$(knowledge_scope)"
+  for f in "$MEM"/knowledge/*.md; do [ -e "$f" ] && in_scope "$f" "$scope" && files+=("$f"); done
+  for d in $(app_knowledge "$scope"); do for f in "$d"/*.md; do files+=("$f"); done; done
+  [ -n "$CLIENT" ] && for f in "$MEM/clients/$CLIENT"/*.md; do [ -e "$f" ] && files+=("$f"); done
+  [ ${#files[@]} -gt 0 ] || die "no pages in scope ($scope)"
+  for w in "$@"; do args+=(-e "$w"); done
+  ( cd "$MEM" && grep -inF "${args[@]}" "${files[@]#"$MEM"/}" ) || die "nothing in scope ($scope) mentions: $*"
+}
+
+cmd_page() {
+  local name="${1:-}" tags="" summary="" body title f idx heading line want
+  [ -n "$name" ] || die "page needs a name: brain-mem page <name> --summary \"...\" < page.md"
+  shift; name="${name%.md}"; name="${name#knowledge/}"
+  printf '%s' "$name" | grep -qE '^[a-z0-9][a-z0-9-]*$' || die "page name '$name': lowercase words joined by '-', named for the topic"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tags) tags="${2:-}"; shift 2 ;;
+      --summary) summary="${2:-}"; shift 2 ;;
+      *) die "page: unknown argument '$1'" ;;
+    esac
+  done
+  f="$MEM/knowledge/$name.md"; idx="$MEM/index.md"
+  [ -t 0 ] && die "page reads the page from stdin: brain-mem page $name ... < page.md"
+  body="$(cat)"
+  title="$(printf '%s\n' "$body" | head -1)"
+  case "$title" in '# '?*) ;; *) die "the page's first line must be its title: '# <topic>'" ;; esac
+  # Whatever tags: line the body carries is replaced by the one this decides.
+  body="$(printf '%s\n' "$body" | awk 'NR > 1 && NR <= 3 && /^tags:/ { next } { print }')"
+  printf '%s\n' "$body" | grep -q '^## Sources[[:space:]]*$' || die "no '## Sources' section: say which records the page's claims come from (projects/<p>/..., sources/<file>)"
+  # Tags: as given; else the page's own; else the agent's own app (BRAIN.md), shared for a base playbook.
+  if [ -z "$tags" ] && [ -f "$f" ]; then tags="$(page_tags "$f" | paste -sd' ' -)"; fi
+  if [ -z "$tags" ] && [ -n "$PROJECT" ] && [ -f "$MEM/projects/$PROJECT/project.env" ]; then
+    project_ctx; tags="$(playbook_dir "$PLAYBOOK")"
+    case "$tags" in "$SYS"/apps/*) tags="${tags#"$SYS"/apps/}"; tags="${tags%%/*}" ;; *) tags=shared ;; esac
+  fi
+  [ -n "$tags" ] || die "say who reads the page: --tags \"<app or stack word>[, ...]\" or --tags shared"
+  tags="$(printf '%s' "$tags" | tr ',' ' ' | tr -s ' ' '\n' | grep . | tr '[:upper:]' '[:lower:]' | awk '!s[$0]++' | paste -sd' ' -)"
+  local known t; known="$(known_tags)"
+  for t in $tags; do
+    stack_names "$t" "$known" || die "tag '$t' is no installed app and no project's stack word — no agent would read the page"
+  done
+  [ "$tags" = shared ] || case " $tags " in *" shared "*) die "'shared' is every agent; it does not combine with other tags" ;; esac
+  if [ -z "$summary" ] && [ -f "$idx" ]; then
+    summary="$(grep -v '^[[:space:]]*<!--' "$idx" | grep -F "(knowledge/$name.md)" | head -1 | sed 's/^[^)]*) *— *//')" || true
+  fi
+  [ -n "$summary" ] || die "a new page needs --summary: one line on what it settles, for index.md"
+  [ -f "$idx" ] || die "memory/index.md is missing"
+  grep -q '^## Knowledge' "$idx" || die "index.md has no '## Knowledge' section to file the page under"
+
+  lock
+  printf '%s\n' "$body" | awk -v t="tags: ${tags// /, }" 'NR == 1 { print; print t; next } { print }' | put "$f"
+  # index.md: drop the page's old line, then file it under the heading that is exactly its
+  # tags (in any order), made at the end of ## Knowledge when there is none yet.
+  want="$(printf '%s\n' $tags | sort | paste -sd' ' -)"
+  line="- [$name.md](knowledge/$name.md) — $summary"
+  awk -v n="(knowledge/$name.md)" -v want="$want" -v line="$line" -v head="### ${tags// /, }" '
+    function key(h,   a, i, k, m, s) { gsub(/,/, " ", h); m = split(h, a, " "); for (i = 1; i <= m; i++) for (k = i + 1; k <= m; k++) if (a[k] < a[i]) { s = a[i]; a[i] = a[k]; a[k] = s }
+      s = ""; for (i = 1; i <= m; i++) s = s (s == "" ? "" : " ") a[i]; return s }
+    !/^[[:space:]]*<!--/ && index($0, n) { next }
+    /^## / { if (inK && !done) { print head; print line; print ""; done = 1 } inK = ($0 ~ /^## Knowledge/) }
+    { print }
+    inK && /^### / && !done && key(substr($0, 5)) == want { print line; done = 1 }
+    END { if (!done) { print ""; print head; print line } }
+  ' "$idx" | put "$idx"
+  echo "wrote knowledge/$name.md [${tags// /, }], filed in index.md"
+  local out; out="$(lint_memory | grep -F "knowledge/$name.md" || true)"
+  [ -z "$out" ] || printf '%s\n' "$out"
+  ! printf '%s\n' "$out" | grep -q '^err '
+}
+
+cmd_propose() {
+  local p="${1:-}" target first
+  [ -n "$p" ] || die "propose what? brain-mem propose \"[system/<file> <where>] what to change — why, with the evidence\""
+  p="${p#- }"
+  case "$p" in '['*']'*) ;; *) die "a proposal starts with its [target]: the file under system/ it changes, and where" ;; esac
+  target="${p#[}"; target="${target%%]*}"
+  first="$(printf '%s' "$target" | awk '{ sub(/[,;`].*/, ""); print $1 }')"
+  case "$first" in system/*) [ -e "$(dirname "$SYS")/$first" ] || die "target $first does not exist" ;; esac
+  case "$p" in *' — '*) ;; *) die "say why after ' — ': the evidence from this project that says so" ;; esac
+  # The format's tail, "(project, date)", so the evidence can be found again.
+  printf '%s' "$p" | grep -qE '\([^()]*[0-9]{4}-[0-9]{2}-[0-9]{2}\)[[:space:]]*$' || p="$p (${PROJECT:-no project}, $(date +%F))"
+  [ -f "$MEM/proposals.md" ] || printf '# Proposals\n\n## Accepted\n\n## Open\n\n## Declined\n' > "$MEM/proposals.md"
+  grep -q '^## Open[[:space:]]*$' "$MEM/proposals.md" || die "proposals.md has no '## Open' heading"
+  local declined; declined="$(proposals_section Declined | grep -F -- "[$first" || true)"
+  lock
+  # After the last non-blank line of ## Open, so the list stays one list.
+  local at; at="$(awk '/^## / { on = ($0 ~ /^## Open[[:space:]]*$/) } on && NF { n = NR } END { print n }' "$MEM/proposals.md")"
+  awk -v at="$at" -v line="- $p" '{ print } NR == at { print line }' "$MEM/proposals.md" | put "$MEM/proposals.md"
+  echo "filed under ## Open in proposals.md"
+  [ -z "$declined" ] || { echo "note: the human declined a change to the same target before — say what is new:"; printf '%s\n' "$declined"; }
+  return 0
+}
+
+cmd_decide() {
+  local d="${1:-}" why="${2:-}" f
+  [ -n "$d" ] && [ -n "$why" ] || die "decide needs both: brain-mem decide \"<decision>\" \"<reason>\""
+  need_project
+  f="$MEM/projects/$PROJECT/decisions.md"
+  [ -f "$f" ] || printf '# Decisions\n\nAppend only. Newest at the bottom. `YYYY-MM-DD — decision — reason`\n\n' > "$f"
+  printf '%s — %s — %s\n' "$(date +%F)" "$d" "$why" >> "$f"
+  echo "appended to projects/$PROJECT/decisions.md"
+}
+
+cmd_check() {
+  local out; out="$(lint_memory)"
+  [ -z "$out" ] && { echo "memory wiki is consistent"; return 0; }
+  printf '%s\n' "$out"
+  ! printf '%s\n' "$out" | grep -q '^err '
+}
+
+case "${1:-}" in
+  scope|search|page|propose|decide|check) c="$1"; shift; "cmd_$c" "$@" ;;
+  ''|-h|--help|help) sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command '$1' — scope, search, page, propose, decide, check" ;;
+esac

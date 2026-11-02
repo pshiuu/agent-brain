@@ -1,0 +1,22 @@
+.DS_Store
+*.tar
+.playwright-mcp/
+.drafts/
+.runs/
+# install.sh's settings for docker compose: this Mac's paths and the cockpit's port.
+.env
+
+# memory/ is a git repo of its own: what this brain learned, its clients, its proposals.
+# The base (this repo) is everyone's and comes from upstream; the memory is the person's and
+# never travels with it. Its own .gitignore keeps project records out of it in turn.
+/memory/
+
+# This brain's own, never the base's: installed apps (copies of folders from APPS_SOURCE,
+# pshiuu/agent-brain-apps), which commit each came from (apps.lock), the skill revisions
+# sync-skills installed for them (skills.lock), the apps' settings from the Studio
+# (config/), and the knobs set for this machine (brain.local.conf, read before brain.conf).
+system/apps/
+system/apps.lock
+system/skills.lock
+system/config/
+system/brain.local.conf

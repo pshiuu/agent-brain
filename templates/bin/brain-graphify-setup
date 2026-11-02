@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Run inside the sandbox, from the project root.
+# Installs the graphify skill for this project (for the current engine) and
+# keeps the files it writes out of git via .git/info/exclude (local-only ignore).
+set -euo pipefail
+engine="${1:-${BRAIN_ENGINE:-claude}}"
+[ -d .git ] || git init -q
+
+if [ "$engine" = "codex" ]; then
+  graphify install --project --platform codex
+else
+  graphify install --project
+fi
+
+exclude=.git/info/exclude
+mkdir -p "$(dirname "$exclude")"
+for p in ".claude/skills/graphify/" ".agents/skills/graphify/" "graphify-out/cost.json" "graphify-out/cache/"; do
+  grep -qxF "$p" "$exclude" 2>/dev/null || echo "$p" >> "$exclude"
+done
+echo "graphify ready. Build the map with /graphify . (Claude) or \$graphify . (Codex)."
+echo "Quick code-only refresh without an LLM: graphify update ."

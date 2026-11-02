@@ -1,0 +1,2951 @@
+#!/usr/bin/env bash
+# brain — start and run agent projects in Docker Sandboxes (sbx)
+#
+#   brain init                          one-time: build templates, import skills
+#   brain playbooks                     list dev paths (playbooks), from system/ and every app
+#   brain app [list]                    the installed apps: version, where each came from
+#   brain app install <name> [--from <git-url|owner/repo|dir> [path]]
+#                                       an app from APPS_SOURCE (pshiuu/agent-brain-apps) or
+#                                       anywhere, into system/apps/<name>; refused unless it passes
+#   brain app remove <name>             take it out (its knowledge stays in memory)
+#   brain app check <name|dir>          the app-format rules: manifest, both role halves, playbooks
+#   brain app test [name]               run the apps' own test/*.sh
+#   brain app catalog                   what the apps repo offers, and which installed app is behind
+#   brain test                          everything: syntax, test suites, lint, playbooks, apps
+#   brain playbook new [name] [--engine E] [--model M] [--effort L]
+#                                       write a playbook: copy an example, name the
+#                                       phases yourself, or have an agent draft it
+#                                       (the flags pick the drafting agent)
+#   brain playbook draft <name>         the cockpit's Draft and Adjust buttons: the author works
+#                                       from .drafts/playbook/<name>/REQUEST.md, the cockpit installs
+#   brain playbook check <name>         the rules that otherwise fail mid-phase
+#   brain playbook analyse <name> [--engine E] [--model M] [--effort L]
+#                                       learn from the projects that ran it: scores each
+#                                       run and an agent files proposals. You accept or
+#                                       decline them, then:
+#   brain playbook evolve <name> [--engine E] [--model M] [--effort L]
+#                                       brain evolve for that playbook alone: applies the
+#                                       accepted proposals that change it or its roles,
+#                                       and leaves the rest waiting
+#   brain role new [name]               add a role: its line in roles.conf and its
+#                                       instructions file, which must agree. Write it
+#                                       yourself or have the role-author draft it
+#   brain new [<playbook> <name>] [--dir PATH] [--client SLUG]
+#                                       create a project (+ memory folder and brief, which
+#                                       it offers to fill in here or with phase one);
+#                                       clones the playbook's code template if it has one.
+#                                       Run it bare and it asks for what you left out.
+#   brain run [phase] [--engine E] [--model M] [--effort L]
+#                                       run the next (or given) phase with the right agent
+#                                       (the sandbox closes itself when the phase is done;
+#                                        BRAIN_AUTOSTOP=0 leaves the session open)
+#   brain auto                          run phases one after another until done / blocked
+#   brain open [--engine E] [--model M] [--effort L]
+#                                       free session with brain + memory loaded
+#   brain up                            publish the project's ports and start its dev
+#                                       stack in the sandbox, so localhost reaches it
+#                                       (needs PORTS / DEV_UP in project.env)
+#   brain down                          stop the project's sandbox — dev stack and ports
+#                                       go away, the data stays. `brain up` brings it back
+#   brain evolve ["what to change"] [--engine E] [--model M] [--effort L]
+#                                       the only command that may write system/: applies
+#                                       memory/proposals.md to the roles and playbooks,
+#                                       or whatever you name. Review with git diff
+#   brain update                        the base from upstream: git pull (a merge that keeps
+#                                       this brain's own commits), then ./install.sh again
+#   brain status                        show phase progress for this project
+#   brain lint                          check the memory wiki (index, links, orphans)
+#   brain approve [phase] [--defer ID]  approve a human gate (e.g. the design); open
+#                                       defects become WAIVED, or DEFERRED when named
+#   brain reject <phase> "feedback"     send a phase with a fix-role back with feedback
+#   brain reopen <phase> "feedback"     send the playbook back to <phase>: it and every
+#                                       later phase run again (launch-gate's way back)
+#   brain watch [install|uninstall]     start what the cockpit asks for: leave it open and
+#                                       its Run, Approve, Draft, Install and Evolve buttons
+#                                       open a Terminal window and run brain for you, and
+#                                       its New project form creates the project. At most
+#                                       BRAIN_MAX_PARALLEL runs at once. `install` makes it
+#                                       a login item so nobody has to start it
+#   brain <app> <verb> [args]           an installed app's own commands, from its cli.sh:
+#                                       brain academy find "<topic>". Its README lists them
+#                                       (each verb takes --engine/--model/--effort, and
+#                                        --level coach|editor|co-writer for one run)
+#   brain sync-skills                   re-import own skills + install system/skills.list
+#   brain sync-sandbox                  register the MCP servers and network rules of
+#                                       system/sandbox.conf and the installed apps' app.conf
+#
+# init, update, playbooks, playbook, role, evolve and lint run anywhere; the rest read
+# the project's project.env and must run from inside the project folder.
+set -euo pipefail
+
+# The brain is the repo this launcher lives in, so two brains on one Mac each drive their
+# own and a copy works wherever it is put. BRAIN still wins, for a one-off. Symlinks are
+# followed: a `brain` linked into /usr/local/bin belongs to the repo it points at.
+if [ -z "${BRAIN:-}" ]; then
+  _self="${BASH_SOURCE[0]}"
+  while [ -L "$_self" ]; do
+    _link="$(readlink "$_self")"
+    case "$_link" in /*) _self="$_link" ;; *) _self="$(dirname "$_self")/$_link" ;; esac
+  done
+  BRAIN="$(cd "$(dirname "$_self")/.." && pwd -P)"
+  unset _self _link
+fi
+DEV="${DEV_DIR:-$HOME/dev}"
+SYS="$BRAIN/system"
+MEM="$BRAIN/memory"
+SBXCONF="$SYS/sandbox.conf"
+# The image tag, and it has to move on its own. A hand-edited VERSION means a tool
+# added to templates/bin/ lands in no image and no sandbox, and the only symptom is a
+# `sbx exec` that quietly fails — which is exactly how brain-runlog went missing from
+# every run after the day it was written. So: the human part from VERSION, the part
+# that actually decides from a hash of the templates themselves.
+TPL_VERSION="$(tr -d '[:space:]' < "$BRAIN/templates/VERSION" 2>/dev/null || echo v1)-$(
+  find "$BRAIN/templates" -type f ! -name '.DS_Store' -exec shasum {} \; 2>/dev/null \
+    | awk '{print $1}' | sort | shasum | cut -c1-10
+)"
+# The knobs, in precedence order: the environment wins, then system/brain.local.conf (this
+# brain's own, which git ignores), then system/brain.conf (the base's defaults), then the
+# default here. `BRAIN_PHASE_TIMEOUT=600 brain run` is still a one-off that changes nothing.
+# Read, not sourced — same as roles.conf and sandbox.conf, so a typo in it cannot run.
+setting() { # KEY default -> the value in brain.local.conf or brain.conf, or the default
+  local v f
+  for f in "$SYS/brain.local.conf" "$SYS/brain.conf"; do
+    [ -f "$f" ] || continue
+    v="$(awk -F= -v k="$1" '
+      { key = $1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", key) }
+      key == k { sub(/^[^=]*=[[:space:]]*/, ""); gsub(/^"|"$/, ""); print; exit }
+    ' "$f")"
+    [ -n "$v" ] && break
+  done
+  echo "${v:-$2}"
+}
+MAX_FIX_LOOPS="${BRAIN_MAX_FIX_LOOPS:-$(setting BRAIN_MAX_FIX_LOOPS 3)}"
+# Two ceilings that only matter when nobody is watching. A phase ends when the agent
+# writes its handoff file, so an agent that hangs, or dies inside the sandbox without
+# writing one, blocks forever — sbx's own --ttl is cloud-only and these are local
+# sandboxes. And MAX_FIX_LOOPS counts FAIL lines in the phase log, so a reviewer that
+# writes RESULT: FAIL into its summary but forgets the log line is a fix loop nothing
+# stops. Both are generous; 0 turns either off.
+PHASE_TIMEOUT="${BRAIN_PHASE_TIMEOUT:-$(setting BRAIN_PHASE_TIMEOUT 7200)}"
+MAX_RUNS="${BRAIN_MAX_RUNS:-$(setting BRAIN_MAX_RUNS 50)}"
+# How many projects `brain watch` lets run at once. Each run is a sandbox, a Terminal
+# window and an agent spending tokens; selecting fifty rows in the cockpit must not open
+# fifty windows. The rest wait in their .run-request files and start as windows close.
+MAX_PARALLEL="${BRAIN_MAX_PARALLEL:-$(setting BRAIN_MAX_PARALLEL 3)}"
+BRAIN_NOTIFY="${BRAIN_NOTIFY:-$(setting BRAIN_NOTIFY "")}"
+RUN_STATUS=""   # set by cmd_run, read by cmd_auto; declared here because set -u is on
+source "$BRAIN/bin/phase-contract.sh"
+# names_in, the root lookups (sys_roots, in_roots, playbook_dir, app_field), brief_body,
+# proposals_section, knowledge_scope and lint_memory: shared with brain-mem in the sandbox.
+source "$SYS/skills/brain-mem/lib.sh"
+
+die()  { echo "brain: $*" >&2; notify "brain: $*"; exit 1; }
+info() { echo "▸ $*"; }
+
+# Unattended, the terminal is not where you are. BRAIN_NOTIFY is any command; the message
+# is appended as its last argument, so `BRAIN_NOTIFY="terminal-notifier -title brain"` and
+# a script of your own both work. Unquoted on purpose, so the flags in it stay flags.
+# Never fatal: a notifier that is missing or broken must not take a run down with it.
+notify() {
+  [ -n "${BRAIN_NOTIFY:-}" ] || return 0
+  # shellcheck disable=SC2086
+  $BRAIN_NOTIFY "$1" >/dev/null 2>&1 || true
+}
+
+# ---------- asking ----------------------------------------------------------
+# Prompts only ever fill in an argument you left out, and only at a terminal.
+# Give a command its arguments (or run it from a script) and nothing changes.
+interactive() { [ -t 0 ] && [ "${BRAIN_NONINTERACTIVE:-0}" != 1 ]; }
+
+ask() { # question [default] -> the answer, or the default when you just hit return
+  local a; read -r -p "  $1${2:+ [$2]}: " a || true; a="${a:-${2:-}}"
+  echo "${a/#\~/$HOME}"   # read does not expand ~, and people type it
+}
+
+pick() { # question item... -> the chosen item (menu on stderr, answer on stdout)
+  local q="$1"; shift
+  local choice; PS3="  $q "
+  select choice in "$@"; do [ -n "$choice" ] && { echo "$choice"; return 0; }; done
+  return 1
+}
+
+
+# ---------- apps --------------------------------------------------------------
+# The base is system/; an installed app is system/apps/<name>/, shaped the same way
+# (roles.conf, roles/, playbooks/, skills/, skills.list) plus an app.conf. Every lookup
+# goes through these, base first, so an app adds what it brings without the base copying
+# anything — and removing the folder removes all of it. A name two roots both define is
+# an error (app_conflicts), never an override. ui/brain.mjs sysRoots is the same rule.
+# sys_roots, in_roots, playbook_dir and app_field live in system/skills/brain-mem/lib.sh.
+BRAIN_VERSION=2
+# The views an app's ui/app.json may name for a project tab. ui/brain.mjs APP_VIEWS is the same
+# list (ui/test.mjs checks they agree): the cockpit renders them, the app picks which.
+APP_VIEWS="article design brandkit"
+role_file() { in_roots "roles/$1.md" || echo "$SYS/roles/$1.md"; }
+all_in() { local r; while read -r r; do names_in "$r/$1"; done < <(sys_roots) | sort -u; }
+roles_conf() { local r; while read -r r; do [ -f "$r/roles.conf" ] && cat "$r/roles.conf"; done < <(sys_roots); return 0; }
+skill_dirs() { local r d; while read -r r; do for d in "$r"/skills/*/; do [ -d "$d" ] && echo "${d%/}"; done; done < <(sys_roots); return 0; }
+skills_lists() { local r; while read -r r; do [ -f "$r/skills.list" ] && cat "$r/skills.list"; done < <(sys_roots); return 0; }
+app_conflicts() { # -> one line per name defined in more than one root
+  local r
+  { while read -r r; do
+      names_in "$r/playbooks" | sed "s|^|playbook |"
+      names_in "$r/skills" | sed "s|^|skill |"
+      [ -f "$r/roles.conf" ] && awk '$1 !~ /^#/ && NF >= 3 { print "role " $1 }' "$r/roles.conf" | sort -u
+    done < <(sys_roots); } | sort | uniq -d | sed 's/$/ is defined in more than one of system\/ and system\/apps\/*/'
+}
+# An app's host side is its cli.sh, sourced on demand: cmd_<app> for `brain <app> <verb>`,
+# <app>_watch for each `brain watch` tick, <app>_studio_new <slug> <stage-dir> for the
+# Studio's New form when the request names the kind the app owns. A project.env with
+# KIND=<kind> belongs to that app, never to the playbook commands.
+kind_app() { # kind -> the installed app whose app.conf says "kind <kind>"; non-zero when none
+  local d; for d in "$SYS"/apps/*/; do
+    [ -f "$d/app.conf" ] && [ "$(app_field "${d%/}" kind)" = "$1" ] && { basename "$d"; return 0; }
+  done; return 1
+}
+app_cli() { # app -> its cli.sh sourced; non-zero when it has none
+  [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]] && [ -f "$SYS/apps/$1/cli.sh" ] || return 1
+  # shellcheck disable=SC1090
+  source "$SYS/apps/$1/cli.sh"
+}
+watch_apps() { local a; for a in $(names_in "$SYS/apps"); do app_cli "$a" && declare -F "${a}_watch" >/dev/null && "${a}_watch"; done; return 0; }
+
+slug() { echo "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-\n' '-'; }
+
+copy_example() { # -> name of the example copied into system/playbooks
+  local -a ex=(); while IFS= read -r x; do ex+=("$x"); done < <(names_in "$BRAIN/examples/playbooks")
+  [ ${#ex[@]} -gt 0 ] || return 1
+  local pick_ex; pick_ex="$(pick 'copy which example?' "${ex[@]}")" || return 1
+  cp -r "$BRAIN/examples/playbooks/$pick_ex" "$SYS/playbooks/"
+  info "copied examples/playbooks/$pick_ex -> system/playbooks/$pick_ex (edit phases, playbook.md, brief.md)" >&2
+  echo "$pick_ex"
+}
+
+# ---------- helpers ----------------------------------------------------------
+
+engine_base() {
+  case "$1" in
+    claude) echo "claude-code-docker" ;;
+    codex)  echo "codex-docker" ;;
+    *) die "unknown engine '$1' (use claude or codex)" ;;
+  esac
+}
+
+role_cfg() { # role -> "engine model effort"
+  local line
+  # NF >= 3 matters: without it a short line makes awk print " ", which passes the
+  # -n check below, so die never fires and sbx gets -t "brain-:v1".
+  line="$(roles_conf | awk -v r="$1" '$1 !~ /^#/ && $1 == r && NF >= 3 { print $2, $3, $4; exit }')"
+  [ -n "$line" ] || die "role '$1' needs a line 'role engine model [effort]' in $SYS/roles.conf"
+  echo "$line"
+}
+
+project_name() { slug "$(basename "$PWD")"; }
+
+load_project() {
+  PROJECT="$(project_name)"
+  PDIR="$MEM/projects/$PROJECT"
+  [ -f "$PDIR/project.env" ] || die "no brain project for '$PROJECT'. Create one with: brain new <playbook> $PROJECT --dir $PWD"
+  # shellcheck disable=SC1091
+  source "$PDIR/project.env"
+  if [ -n "${KIND:-}" ]; then
+    local app; app="$(kind_app "$KIND")" || die "'$PROJECT' is KIND=$KIND, which no installed app owns — install that app (brain app install $KIND)"
+    die "'$PROJECT' belongs to the $app app (KIND=$KIND), not to a playbook — use brain $app"
+  fi
+  CLIENT="${CLIENT:-}"; clients_on || CLIENT=""
+  PHASES_FILE="$(playbook_dir "$PLAYBOOK")/phases"
+  [ -f "$PHASES_FILE" ] || die "playbook '$PLAYBOOK' has no phases file"
+}
+
+phase_lines() { awk '$1 !~ /^#/ && NF >= 2' "$PHASES_FILE"; }
+
+phase_field() { # phase fieldno
+  phase_lines | awk -v p="$1" -v f="$2" '$1 == p { print $f; exit }'
+}
+
+next_phase() {
+  local phase
+  while read -r phase _; do
+    [ -f "$PDIR/phases/$phase.done" ] || { echo "$phase"; return; }
+  done < <(phase_lines)
+}
+
+# Who the next `brain run` actually sends for a phase: the fix-role, when a review has
+# failed and its fix has not landed yet; the phase's own role otherwise. One branch, so
+# `brain status` can never name a reviewer that `brain run` would not run.
+fix_pending() { # phase
+  local p="$PDIR/phases/$1"
+  [ -n "$(phase_field "$1" 3)" ] || return 1
+  verdict_is FAIL "$p.md" || return 1
+  ! [ "$p.fixed" -nt "$p.md" ]
+}
+
+# The verdict is the one line that says it, and only that line: a summary quoting a
+# reviewer's "RESULT: FAIL" in prose is not a failed review. phase_finished, fix_pending,
+# status, auto and the cockpit all read it through this rule.
+verdict_is() { grep -Eq "^RESULT: $1[[:space:]]*\$" "$2" 2>/dev/null; } # PASS|FAIL summary
+
+# The phase's own instructions, as the playbook states them now: the lines above the
+# first "## " reach every phase, then the phase's section. Human gates print the section;
+# agents get both in the prompt, so what they were told is in prompt.md, hashed.
+playbook_preamble() { awk 'NR == 1 && /^# / { next } /^> / && !d { d = 1; next } /^## / { exit } { print }' "$(playbook_dir "$PLAYBOOK")/playbook.md" | awk 'NF { p = 1 } p'; }
+phase_section() { awk -v p="## $1" '$0 == p { on = 1; next } /^## / { on = 0 } on' "$(playbook_dir "$PLAYBOOK")/playbook.md"; }
+
+conf_lines() { # kind -> the rest of every "<kind> ..." line in sandbox.conf
+  [ -f "$SBXCONF" ] || return 0
+  awk -v k="$1" '$1 == k { $1 = ""; sub(/^ +/, ""); print }' "$SBXCONF"
+}
+
+app_lines() { # key -> "<app> <rest>" for every "<key> ..." line in the installed apps' app.conf
+  local d
+  for d in "$SYS"/apps/*/; do
+    [ -f "$d/app.conf" ] || continue
+    awk -v k="$1" -v a="$(basename "$d")" '$1 == k { sub(/^[^[:space:]]+[[:space:]]*/, ""); print a " " $0 }' "$d/app.conf"
+  done
+}
+
+# An app's server that needs a secret is on only once brain watch stored the key; one
+# without a secret (OAuth, or none) is on as soon as the app is installed.
+app_mcp_on() { # name -> zero when the app server of that name may go into a sandbox
+  app_lines secret | awk -v n="$1" '$2 == n { f = 1 } END { exit !f }' || return 0
+  grep -q '^connected' "$MEM/.secret-$1.status" 2>/dev/null
+}
+
+mcp_names() { # comma-separated server names for --static-mcp
+  local names="" n
+  while read -r n _; do [ -n "$n" ] && names="$names${names:+,}$n"; done < <(conf_lines mcp)
+  while read -r _ n _; do [ -n "$n" ] && app_mcp_on "$n" && names="$names${names:+,}$n"; done < <(app_lines mcp)
+  # BRAIN_MCP still works, for a one-off server you do not want in the file.
+  [ -n "${BRAIN_MCP:-}" ] && names="$names${names:+,}$BRAIN_MCP"
+  echo "$names"
+}
+
+sandbox_exists() { sbx ls 2>/dev/null | awk 'NR > 1 { print $1 }' | grep -qx "$1"; }
+
+sandbox_name() { echo "$PROJECT-$1"; } # engine -> name
+
+# The agent's LAST write for this run, per the contract in BRAIN.md: a normal role and a
+# passing review end with .done, a fix round with .fixed, and a failing review never
+# creates .done at all — its last write is the .log line that follows the summary, so
+# that path needs both or stopping early loses the line and the fix-loop ceiling never
+# trips. Everything is compared against .running, touched immediately before the run, so
+# a marker left over from an earlier round never counts as this one finishing.
+# ponytail: -nt compares mtimes to the second on bash 3.2 (what macOS ships), so a handoff
+# file written in the same second as .running reads as "not newer", and the phase looks
+# unfinished until the timeout. No real phase can hit that — sbx has to start a sandbox
+# first. If that stops being true, stamp .running a second into the past instead.
+phase_finished() { # phase [work|review|fix]
+  local p="$PDIR/phases/$1" since="$PDIR/phases/$1.running"
+  local mode="${2:-work}" verdict last
+  if [ "$mode" = fix ]; then
+    [ "$p.fixed" -nt "$since" ] && [ -s "$p.fixed" ] && [ ! "$p.done" -nt "$since" ]
+    return
+  fi
+  [ "$p.md" -nt "$since" ] && [ -s "$p.md" ] || return 1
+  if [ "$mode" = review ]; then
+    verdict="$(sed -nE 's/^RESULT: (PASS|FAIL)[[:space:]]*$/\1/p' "$p.md")"
+    [ "$verdict" = PASS ] || [ "$verdict" = FAIL ] || return 1
+    [ "$p.log" -nt "$since" ] || return 1
+    last="$(awk 'NF { line=$0 } END { print line }' "$p.log")"
+    [[ "$last" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]$verdict$ ]] || return 1
+    if [ "$verdict" = FAIL ]; then [ ! "$p.done" -nt "$since" ]; return; fi
+  fi
+  [ "$p.done" -nt "$since" ]
+}
+
+# ---------- attempts nobody finished ----------------------------------------
+# A launcher that dies outright leaves its attempt open: a .running lease that makes the
+# phase look busy forever (and makes `brain watch` refuse the project), and a record with
+# a plan and no result. Its pid is the lease — no heartbeat — so any later launcher can
+# tell. The markers it wrote after the lease were never checked; they are held as
+# rejected, and the phase runs again.
+attempt_alive() { # run-dir -> 0 while the launcher that began it is still running
+  local pid; pid="$(cat "$1/launcher" 2>/dev/null)" || return 1
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+}
+
+live_leases() { # project pdir -> "phase " for every lease whose launcher is alive
+  local lease id
+  for lease in "$2"/phases/*.running; do
+    [ -f "$lease" ] || continue
+    id="$(head -1 "$lease" 2>/dev/null | tr -dc 'A-Za-z0-9_-')"
+    [ -n "$id" ] && attempt_alive "$BRAIN/.runs/$1/$(basename "$lease" .running)/$id" \
+      && printf '%s ' "$(basename "$lease" .running)"
+  done
+  return 0
+}
+
+close_crashed() { # run-dir pdir phase
+  local m
+  bash "$BRAIN/bin/run-record.sh" finish "$1" "$2" "$3" crashed "" >/dev/null 2>&1 || return 0
+  for m in done fixed; do [ ! -f "$1/proposed.$m" ] || mv "$1/proposed.$m" "$1/rejected.$m"; done
+}
+
+sweep_stale() { # project pdir
+  local project="$1" pdir="$2" lease id phase dir m
+  for lease in "$pdir"/phases/*.running; do
+    [ -f "$lease" ] || continue
+    phase="$(basename "$lease" .running)"
+    id="$(head -1 "$lease" 2>/dev/null | tr -dc 'A-Za-z0-9_-')"
+    dir="$BRAIN/.runs/$project/$phase/$id"
+    if [ -n "$id" ] && attempt_alive "$dir"; then continue; fi
+    if [ -n "$id" ] && [ -f "$dir/plan.json" ] && [ ! -e "$dir/result.json" ]; then
+      for m in done fixed; do
+        if [ "$pdir/phases/$phase.$m" -nt "$lease" ]; then mv "$pdir/phases/$phase.$m" "$dir/proposed.$m"; fi
+      done
+      close_crashed "$dir" "$pdir" "$phase"
+    fi
+    rm -f "$lease"
+    info "'$phase' was left running by a launcher that is gone — closed as crashed${id:+ ($dir)}"
+  done
+  # A record still being written has no plan.json yet (it is begin's last write), and
+  # one that is running has a live launcher, so neither is taken for an orphan.
+  for dir in "$BRAIN/.runs/$project"/*/*/; do
+    dir="${dir%/}"
+    [ -f "$dir/plan.json" ] && [ ! -e "$dir/result.json" ] || continue
+    attempt_alive "$dir" && continue
+    close_crashed "$dir" "$pdir" "$(basename "$(dirname "$dir")")"
+    info "an unfinished attempt was closed as crashed: $dir"
+  done
+  return 0
+}
+
+# The receipt for one run, written from inside the sandbox because that is where the
+# transcript lives — and before the sandbox is stopped, so reading it costs no restart.
+# Best effort on purpose: a codex run keeps no such transcript, and no phase is worth
+# failing over a missing log.
+write_runlog() { # sandbox phase role run-id
+  # Named by the host record's run id, so the two halves of one attempt join: what the
+  # agent did (tokens, tools, skills, files read) here, and what it ran against and what
+  # the host decided in .runs/<project>/<phase>/<run-id>/ — role.md and summary.md
+  # included, so the reason round one failed can still be read against round three.
+  # run-record.sh finish copies this receipt into that record as transcript.json.
+  # Not silenced: the report is the point, and the end of the run is when you are
+  # actually looking. The role file goes in so it can say which declared skills the run
+  # never invoked, which is the part you act on.
+  local dir="$PDIR/phases/$2.runs"
+  mkdir -p "$dir"
+  sbx exec "$1" -- brain-runlog "$dir/$4.json" "$(role_file "$3")" \
+    || info "no run report: brain-runlog failed in $1 (an older sandbox does not have it — see the template warning above)"
+  true
+}
+
+# Every sandbox on this Mac reads one skill store, and every brain on it prunes that store
+# to its own list when it syncs. So another brain's `brain init` takes this one's skills
+# away, or swaps in its own copies under the same names (seo-content vanished mid-project
+# that way). Checked before each agent starts; a full sync puts them back.
+ensure_skills() {
+  local have d s repo rest want=""
+  have=" $(sbx skills ls 2>/dev/null | awk 'NR > 1 && NF == 1' | tr '\n' ' ') "
+  for d in $(skill_dirs); do
+    s="$(basename "$d")"
+    [ "$(readlink "$HOME/.agents/skills/$s" 2>/dev/null)" = "${d%/}" ] || want=1
+    case "$have" in *" $s "*) ;; *) want=1 ;; esac
+  done
+  if :; then
+    while read -r repo rest; do
+      case "$repo" in ''|'#'*|keep:) continue ;; esac
+      for s in $rest; do case "$have" in *" $s "*) ;; *) want=1 ;; esac; done
+    done < <(skills_lists)
+  fi
+  [ -n "$want" ] || return 0
+  info "the sandbox skill store is missing some of this brain's skills (another brain synced it?) — syncing them back"
+  cmd_sync_skills
+}
+
+ensure_sandbox() { # engine -> sets SANDBOX
+  local engine="$1"
+  SANDBOX="$(sandbox_name "$engine")"
+  # A sandbox is built from the image once and never revisited, while the templates keep
+  # changing — so the drift is silent and permanent. The marker is what makes it speak.
+  local mark="${PDIR:-}${PDIR:+/.sandbox-$engine.tpl}"
+  if ! sandbox_exists "$SANDBOX"; then
+    info "creating sandbox $SANDBOX from brain-$engine:$TPL_VERSION"
+    local mcp_args=() mcp; mcp="$(mcp_names)"
+    # Fixed at create time: a sandbox never picks up servers added to sandbox.conf later.
+    [ -n "$mcp" ] && mcp_args=(--static-mcp "$mcp")
+    # `brain evolve` works on the brain repo itself, so system/ and memory/ are already
+    # inside its workspace. Mounting them again would shadow them with themselves — and
+    # the system one read-only, which is the half the whole command exists to write.
+    local mounts=("$PWD"); [ "${BRAIN_SELF:-0}" = 1 ] || mounts+=("$SYS:ro" "$MEM")
+    sbx create --name "$SANDBOX" -t "brain-$engine:$TPL_VERSION" ${mcp_args[@]+"${mcp_args[@]}"} \
+      -e BRAIN_SYSTEM="$SYS" -e BRAIN_MEMORY="$MEM" \
+      -e BRAIN_PROJECT="$PROJECT" -e BRAIN_ENGINE="$engine" \
+      "$engine" "${mounts[@]}"
+    # Mounted at create time, as extra workspaces: `sbx create` takes the HOST:ro form,
+    # while `sbx mount` wants HOST:CTR_TARGET:ro and reads a bare "ro" as the target.
+    # Create-time also means a failure leaves no sandbox at all, instead of one that
+    # exists without its mounts and is silently reused by the next run.
+    # Extra workspaces land on the same path they have on the host, which is what the
+    # BRAIN_SYSTEM / BRAIN_MEMORY values above assume.
+    [ -n "$mark" ] && printf '%s\n' "$TPL_VERSION" > "$mark" 2>/dev/null || true
+  elif [ -n "$mark" ] && [ "$(cat "$mark" 2>/dev/null || echo unknown)" != "$TPL_VERSION" ]; then
+    info "⚠ $SANDBOX was built from template $(cat "$mark" 2>/dev/null || echo 'an unrecorded version'), the templates are now $TPL_VERSION."
+    info "  Its brain-* tools are the old ones, so anything added since fails silently. To rebuild:"
+    info "    brain init && sbx rm --force $SANDBOX"
+    info "  That deletes what lives inside the sandbox, including any database volume. Bring data out first."
+  fi
+  publish_ports "$SANDBOX"
+}
+
+# The sandbox is the permission boundary, which also means the dev server and its
+# database are inside it: without this, a phase can have the site running and you
+# cannot open it. PORTS in project.env is the whole opt-in — no line, nothing
+# published, so a project that is not a web project stays closed. Entries are sbx's
+# own spec (HOST:SANDBOX, or a bare port for an ephemeral host one), comma-separated:
+#   PORTS=3000:3000,27018:27018
+# Re-publishing an existing mapping is a no-op error, hence the swallow. Whoever runs
+# the phase that starts the stack (scaffold) writes the line.
+publish_ports() { # sandbox
+  [ -n "${PORTS:-}" ] || return 0
+  local p
+  for p in $(printf '%s' "$PORTS" | tr ',' ' '); do
+    sbx ports "$1" --publish "$p" >/dev/null 2>&1 || true
+  done
+}
+
+model_args() { # engine model effort -> CLI args for the agent
+  local engine="$1" model="$2" effort="${3:-}"
+  if [ -n "$model" ] && [ "$model" != "default" ]; then
+    if [ "$engine" = "claude" ]; then printf '%s\n' --model "$model"; else printf '%s\n' -m "$model"; fi
+  fi
+  # Reasoning effort. Empty or "default" passes no flag at all, so a 3-column
+  # roles.conf keeps behaving exactly as before.
+  if [ -n "$effort" ] && [ "$effort" != "default" ]; then
+    if [ "$engine" = "claude" ]; then printf '%s\n' --effort "$effort"
+    else printf '%s\n' -c "model_reasoning_effort=\"$effort\""; fi
+  fi
+}
+
+# ---------- proposals queue --------------------------------------------------
+# The queue's rules and proposals_section are in system/skills/brain-mem/lib.sh.
+# Which proposals would change a playbook: its own folder, or a role its phases run. Read
+# from the leading [target] alone, because the evidence after it names other files as
+# often as not. ui/brain.mjs playbookProposals is the same rule.
+targets_playbook() { # playbook -> the "- [target] ..." lines on stdin that would change it
+  local roles
+  roles="$(awk '$1 !~ /^#/ && NF >= 2 { print $2; if (NF >= 3) print $3 }' "$(playbook_dir "$1")/phases" 2>/dev/null \
+    | grep -vx human | sort -u | tr '\n' ' ')"
+  awk -v pb="$1" -v roles="$roles" '
+    BEGIN { n = split(roles, r, " ") }
+    match($0, /^- \[[^]]*\]/) {
+      t = substr($0, RSTART, RLENGTH)
+      if (t ~ ("playbooks/" pb "([^a-z0-9-]|$)")) { print; next }
+      for (i = 1; i <= n; i++) if (index(t, "roles/" r[i] ".md")) { print; next }
+    }'
+}
+
+cmd_lint() {
+  # A name in two roots is the brain's error, not the wiki's, but this is the check people run.
+  local out; out="$(lint_memory; app_conflicts | sed "s/^/err /")"
+  [ -z "$out" ] && { info "memory wiki is consistent"; return 0; }
+  echo "$out" | sed 's/^err /  ✗ /; s/^note /  · /'
+  echo "$out" | grep -q '^err ' && die "fix the ✗ lines (an agent can: brain open)"
+  return 0
+}
+
+# memory/ is its own git repo, the person's, inside the base's checkout, which ignores it:
+# the base comes from upstream and is updated by a merge, the memory never leaves this
+# brain unless its owner pushes it. -e .git, not rev-parse: inside the base's checkout
+# rev-parse would find the base's repo.
+commit_memory() {
+  [ -e "$MEM/.git" ] || return 0
+  git -C "$MEM" add -A . >/dev/null 2>&1 || true
+  git -C "$MEM" commit -qm "memory: $1" >/dev/null 2>&1 && info "memory committed ($1)" || true
+  local bad; bad="$(lint_memory | grep '^err ' || true)"
+  [ -n "$bad" ] && echo "$bad" | sed 's/^err /▸ memory lint: /' >&2
+  return 0
+}
+
+memory_init() { # a brain without memory/ gets the files an agent expects, as its own repo
+  local d
+  if [ ! -f "$MEM/index.md" ]; then
+    mkdir -p "$MEM"/{knowledge,clients,projects,sources}
+    for d in knowledge clients projects sources; do : > "$MEM/$d/.gitkeep"; done
+    cp "$BRAIN/examples/memory/"*.md "$MEM/" || die "examples/memory/ is missing — that is where the blank memory files live"
+    info "started an empty memory in $MEM"
+  fi
+  [ -f "$MEM/.gitignore" ] || cp "$BRAIN/examples/memory/.gitignore" "$MEM/.gitignore"
+  [ -e "$MEM/.git" ] || { git -C "$MEM" init -q && git -C "$MEM" add -A && git -C "$MEM" commit -qm "memory: start" && info "memory/ is a git repo of its own: back it up with a private remote (git -C $MEM remote add origin <url>)"; }
+}
+
+launch() { # engine model effort prompt [role]
+  local engine="$1" model="$2" effort="$3" prompt="$4" role="${5:-}"
+  # Neither CLI fails on a bad effort: claude warns and uses its default, codex says
+  # nothing at all, so a typo in roles.conf would quietly run the phase at default
+  # effort. Checked against the union of both engines' values — the per-model limits
+  # are in Codex's catalog, which the cockpit reads and this cannot.
+  case "$effort" in
+    ''|default|low|medium|high|xhigh|max) ;;
+    none) [ "$engine" = codex ] || die "effort 'none' is a codex value; claude takes low medium high xhigh max" ;;
+    *) die "unknown effort '$effort' for $engine — low, medium, high, xhigh, max${engine:+$([ "$engine" = codex ] && echo ', none')}. Left unchecked the CLI ignores it and the phase runs at default effort." ;;
+  esac
+  ensure_sandbox "$engine"
+  ensure_skills
+  local margs=()
+  while IFS= read -r a; do [ -n "$a" ] && margs+=("$a"); done < <(model_args "$engine" "$model" "$effort")
+  # The role reaches each engine the way that engine actually loads instructions, so it
+  # is context the agent starts with rather than a path it is asked to go and read.
+  # $SYS is mounted at its host path in the sandbox, so these paths resolve inside too.
+  # BRAIN_ROLE_SYSTEM_PROMPT=0 disables both, for an image whose CLI is older.
+  local rf=""
+  if [ -n "$role" ]; then
+    rf="$(role_file "$role")"
+    # Without this the guards below just skip the role and the agent runs with no
+    # instructions at all — the phase "works" and does whatever it likes.
+    [ -f "$rf" ] || die "role '$role' has a line in roles.conf but no instructions at $rf. Write it, or: brain role new $role"
+  fi
+  # Handoffs go through files (BRAIN.md), and one sandbox serves every role of the
+  # project — so Claude's own auto-memory in it would let the porter's private notes
+  # reach the reviewer that checks the porter. Cleared before each role. (The
+  # forward-energie sandbox had the folder, empty, on 2026-09-23.)
+  if [ "$engine" = claude ] && [ -n "$role" ]; then
+    sbx exec "$SANDBOX" -- sh -c 'rm -rf "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/memory' >/dev/null 2>&1 || true
+  fi
+  if [ "${BRAIN_ROLE_SYSTEM_PROMPT:-1}" = 1 ]; then
+    # Claude: a real system prompt.
+    if [ "$engine" = claude ] && [ -n "$rf" ] && [ -f "$rf" ]; then
+      margs+=(--append-system-prompt-file "$rf")
+    fi
+    # Codex has no such flag, but it reads $CODEX_HOME/AGENTS.md — the container's own
+    # home, never your repo — before any AGENTS.md in the workspace. Confirmed with
+    # `codex debug prompt-input`: the role text is in the model-visible prompt with the
+    # file there and absent without it. Written fresh every launch, and cleared when
+    # there is no role, so one phase's role never leaks into the next.
+    if [ "$engine" = codex ]; then
+      if [ -n "$rf" ] && [ -f "$rf" ]; then
+        sbx exec "$SANDBOX" -- sh -c 'mkdir -p "${CODEX_HOME:-$HOME/.codex}" && cp "$1" "${CODEX_HOME:-$HOME/.codex}/AGENTS.md"' _ "$rf" >/dev/null 2>&1 \
+          || info "could not place the role as the sandbox's AGENTS.md — the prompt still names the file"
+      else
+        sbx exec "$SANDBOX" -- sh -c 'rm -f "${CODEX_HOME:-$HOME/.codex}/AGENTS.md"' >/dev/null 2>&1 || true
+      fi
+    fi
+  fi
+  info "starting $engine${model:+ ($model)}${effort:+ effort=$effort} in $SANDBOX"
+  sbx run --name "$SANDBOX" -- ${margs[@]+"${margs[@]}"} "$prompt"
+}
+
+header() {
+  local scope ak; scope="$(knowledge_scope)"; ak="$(app_knowledge "$scope" | paste -sd' ' -)"
+  cat <<EOF
+You are working inside the agent brain system.
+Brain instructions (read-only): $SYS
+Brain memory (read-write):      $MEM
+Project: $PROJECT   Playbook: $PLAYBOOK   Project memory: $PDIR
+Client memory: $( [ -n "$CLIENT" ] && echo "$MEM/clients/$CLIENT" || echo none )
+Knowledge scope: $scope — in index.md, read only the Knowledge sections tagged with one of these.
+EOF
+  [ -z "$ak" ] || echo "App knowledge (read-only, shipped with the apps): $ak — open the pages there that fit your task."
+  echo "First read $SYS/BRAIN.md and follow it."
+}
+
+# ---------- commands ---------------------------------------------------------
+
+cmd_init() {
+  command -v sbx >/dev/null || die "sbx not found"
+  command -v docker >/dev/null || die "docker not found (building templates needs Docker Desktop, see README)"
+  local engine img tar
+  for engine in claude codex; do
+    img="brain-$engine:$TPL_VERSION"
+    # The tag carries a hash of templates/, so a loaded tag is exactly this build: skip
+    # the minutes of save and load, which is what makes running init (or install.sh) again cheap.
+    if sbx template ls 2>/dev/null | awk '{ print $1 ":" $2 }' | grep -qx "docker.io/library/$img"; then
+      info "$img is already loaded in sbx"; continue
+    fi
+    info "building $img"
+    docker build --build-arg BASE="$(engine_base "$engine")" -t "$img" "$BRAIN/templates"
+    tar="$(mktemp "${TMPDIR:-/tmp}/brain-$engine.XXXXXX")"
+    docker image save "$img" -o "$tar"
+    sbx template load "$tar"
+    rm -f "$tar"
+  done
+  cmd_sync_skills
+  cmd_sync_sandbox
+  if ! git -C "$BRAIN" rev-parse --git-dir >/dev/null 2>&1; then
+    git -C "$BRAIN" init -q && git -C "$BRAIN" add -A && git -C "$BRAIN" commit -qm "brain: initial"
+  fi
+  memory_init
+  if [ -z "$(all_in playbooks)" ] && [ -n "$(names_in "$BRAIN/examples/playbooks")" ] && interactive; then
+    echo
+    echo "system/playbooks/ is empty — that is deliberate, a playbook is how your team"
+    echo "works. Copy an example to start from, or skip and write your own:"
+    local -a ex=(); while IFS= read -r x; do ex+=("$x"); done < <(names_in "$BRAIN/examples/playbooks")
+    local chosen; chosen="$(pick 'copy which example?' "${ex[@]}" skip)" || chosen=skip
+    [ "$chosen" = skip ] || { cp -r "$BRAIN/examples/playbooks/$chosen" "$SYS/playbooks/"; info "copied $chosen"; }
+  fi
+  [ -n "$(all_in playbooks)" ] \
+    || info "no playbooks yet — write one with: brain playbook new"
+  info "done. Next: brain new   (it asks which playbook and what to call the project)"
+}
+
+cmd_sync_skills() {
+  # 1. Own skills: link system/skills/* into ~/.agents/skills and import.
+  #    Note: `sbx skills import` imports EVERY skill from all agent folders on this Mac.
+  mkdir -p "$HOME/.agents/skills"
+  local d
+  for d in $(skill_dirs); do
+    ln -sfn "${d%/}" "$HOME/.agents/skills/$(basename "$d")"
+  done
+  sbx skills import --force >/dev/null 2>&1 || sbx skills import --force
+  info "own skills imported: $(skill_dirs | xargs -n1 basename | tr "\n" " ")"
+
+  # 2. Keep list = own skills + names in skills.list + "keep:" lines. Remove the rest,
+  #    so sandboxes only see what the brain uses (set BRAIN_PRUNE_SKILLS=0 to disable).
+  local list; list="$(mktemp)"; skills_lists > "$list"; local repo rest args s keep=" "
+  for d in $(skill_dirs); do keep="$keep$(basename "$d") "; done
+  if [ -f "$list" ]; then
+    while read -r repo rest; do
+      case "$repo" in ''|'#'*) continue ;; keep:) keep="$keep$rest " ;; *) keep="$keep$rest " ;; esac
+    done < "$list"
+  fi
+  if [ "${BRAIN_PRUNE_SKILLS:-1}" = "1" ]; then
+    local removed=""
+    while read -r s; do
+      case "$keep" in *" $s "*) ;; *) sbx skills rm --force "$s" >/dev/null 2>&1 && removed="$removed $s" ;; esac
+    done < <(sbx skills ls 2>/dev/null | awk 'NR > 1 && NF == 1')
+    [ -n "$removed" ] && info "removed from sandbox store (not in keep list):$removed"
+  fi
+
+  # 3. External skills (public or private git repos), one repo per line in system/skills.list
+  [ -f "$list" ] || return 0
+  # sbx installs each repo at whatever HEAD is today, so write down which HEAD that was.
+  # Every run record hashes this file, so a skill that changed between two phases is a
+  # visible difference instead of a mystery, and `git diff system/skills.lock` is the
+  # upgrade. Recorded, not pinned: sbx takes no ref.
+  local lock="$SYS/skills.lock" url head
+  { echo "# Written by brain sync-skills: the commit each system/skills.list repo was at when it"
+    echo "# was installed. Run records hash this file; do not edit it by hand."
+  } > "$lock.tmp"
+  while read -r repo rest; do
+    case "$repo" in ''|'#'*|keep:) continue ;; esac
+    args=()
+    for s in $rest; do args+=(--skill "$s"); done
+    info "sbx skills add $repo $rest"
+    sbx skills add "$repo" ${args[@]+"${args[@]}"} --force >/dev/null \
+      || echo "⚠ could not install from $repo (check the URL / your git access)" >&2
+    case "$repo" in *://*|*@*:*) url="$repo" ;; *) url="https://github.com/$repo" ;; esac
+    head="$(git ls-remote "$url" HEAD 2>/dev/null | awk 'NR == 1 { print $1 }')"
+    echo "$repo ${head:-unknown}" >> "$lock.tmp"
+  done < "$list"
+  mv "$lock.tmp" "$lock"
+  info "skill revisions recorded in system/skills.lock"
+  info "sandbox skills now: $(sbx skills ls 2>/dev/null | awk 'NR > 1 && NF == 1' | tr '\n' ' ')"
+}
+
+cmd_sync_sandbox() {
+  command -v sbx >/dev/null || die "sbx not found"
+  local name rest hosts
+  # MCP servers. A name sbx already knows is left alone: re-adding an OAuth server
+  # would re-run its browser consent on every sync. Change one with `sbx mcp rm`.
+  while read -r name rest; do
+    [ -n "$name" ] || continue
+    if sbx mcp inspect "$name" >/dev/null 2>&1; then
+      info "mcp $name already registered"
+    else
+      info "sbx mcp add $name $rest"
+      # shellcheck disable=SC2086  # rest is a flag list, word splitting is the point
+      sbx mcp add "$name" $rest || echo "⚠ could not register MCP server '$name' (try the command by hand)" >&2
+    fi
+  done < <(conf_lines mcp)
+  # An app's server without a secret registers here; one with a secret when its key is stored.
+  local app url
+  while read -r app name url _; do
+    [ -n "$url" ] || continue
+    app_lines secret | awk -v n="$name" '$2 == n { f = 1 } END { exit !f }' && continue
+    sbx mcp inspect "$name" >/dev/null 2>&1 && continue
+    info "sbx mcp add $name --url $url   (app $app)"
+    sbx mcp add "$name" --url "$url" >/dev/null || echo "⚠ could not register $app's MCP server '$name'" >&2
+  done < <(app_lines mcp)
+
+  # Network policy. sbx is idempotent here (it says "Already covered") and deny
+  # beats allow, so the order does not matter and re-running changes nothing.
+  while read -r hosts; do
+    [ -n "$hosts" ] && sbx policy allow network "$(echo "$hosts" | tr ' ' ',')"
+  done < <(conf_lines allow)
+  # ponytail: an app's hosts stay allowed after it is removed; egress is allow-all by default,
+  # so that only matters once someone narrows it.
+  while read -r _ hosts; do
+    [ -n "$hosts" ] && sbx policy allow network "$(echo "$hosts" | tr ' ' ',')"
+  done < <(app_lines allow)
+  while read -r hosts; do
+    [ -n "$hosts" ] && sbx policy deny network "$(echo "$hosts" | tr ' ' ',')"
+  done < <(conf_lines deny)
+
+  local mcp; mcp="$(mcp_names)"
+  [ -n "$mcp" ] && info "new sandboxes get MCP: $mcp (existing ones keep theirs: sbx mcp load <name> --sandbox <sandbox>)"
+  return 0
+}
+
+cmd_playbooks() {
+  local d found=0
+  for d in $(all_in playbooks); do d="$(playbook_dir "$d")/"
+    [ -d "$d" ] || continue; found=1
+    printf '  %-18s %s\n' "$(basename "$d")" "$(sed -n 's/^> //p' "$d/playbook.md" | head -1)"
+  done
+  [ "$found" = 1 ] && return 0
+  # Shipped empty on purpose: a playbook is how *your* team works, not how mine does.
+  echo "  none yet. Write one:"
+  echo "    brain playbook new        # copy an example, name the phases, or have an agent draft it"
+  local d
+  for d in "$BRAIN"/examples/playbooks/*/; do
+    [ -d "$d" ] || continue
+    printf '    cp -r %s %s\n' "examples/playbooks/$(basename "$d")" "system/playbooks/"
+  done
+}
+
+
+# ---------- authoring a playbook ---------------------------------------------
+# A playbook is three files. The rules that make one actually run are few, and all
+# of them are enforced here rather than discovered mid-phase:
+#   phases      <phase> <role> [fix-role]   role must exist in roles.conf
+#   playbook.md a '> description' line and a '## <phase>' section per phase
+#   brief.md    what the human fills in before phase one
+
+role_names() { roles_conf | awk '$1 !~ /^#/ && NF >= 3 { print $1 }'; }
+
+# A role is two halves. A conf line without instructions is the worse half to be
+# missing: role_names still lists it, so a playbook passes its check and the phase
+# then runs as a bare agent with no role at all.
+role_why_not() { # role -> why it is not usable, or nothing; non-zero when unusable
+  role_names | grep -qx "$1" || { echo "has no line in roles.conf"; return 1; }
+  [ -f "$(role_file "$1")" ] \
+    || { echo "has a line in roles.conf but no instructions — write $(role_file "$1"), or: brain role new $1"; return 1; }
+}
+
+check_playbook() { # dir -> "err|note <problem>" lines, non-zero when any err
+  local d="$1" bad=0 phase role fix why
+  [ -f "$d/phases" ]      || { echo "err  no phases file";  return 1; }
+  [ -f "$d/playbook.md" ] || { echo "err  no playbook.md";  return 1; }
+  grep -q '^> ' "$d/playbook.md" || { echo "err  playbook.md has no '> one-line description' (brain playbooks prints it)"; bad=1; }
+  while read -r phase role fix _; do
+    case "$phase" in ''|'#'*) continue ;; esac
+    case "$fix" in '#'*) echo "err  phase '$phase': a '#' comment on a data line is read as the fix-role"; bad=1; fix="" ;; esac
+    if [ -z "$role" ]; then echo "err  phase '$phase' has no role"; bad=1; continue; fi
+    if [ "$role" != human ]; then
+      why="$(role_why_not "$role")" || { echo "err  phase '$phase': role '$role' $why"; bad=1; }
+    fi
+    if [ -n "$fix" ]; then
+      why="$(role_why_not "$fix")" || { echo "err  phase '$phase': fix-role '$fix' $why"; bad=1; }
+    fi
+    # A human gate with no fix-role can only ever be approved: brain reject refuses on
+    # it, so there is no way to send the work back. Fine for a final sign-off, a defect
+    # anywhere else — hence a note, not an error. Same levels the cockpit's lint uses.
+    [ "$role" != human ] || [ -n "$fix" ] \
+      || echo "note phase '$phase' is a human gate with no fix-role — 'brain reject $phase' refuses, so the way back is 'brain reopen <earlier phase>'"
+    # A reviewer that is its own fixer marks its own homework: the finding and the fix
+    # come from one set of instructions, and the recheck is the same eyes again.
+    [ -z "$fix" ] || [ "$fix" != "$role" ] \
+      || { echo "err  phase '$phase': fix-role is the phase's own role '$role' — a review cannot fix its own findings"; bad=1; }
+    # A reviewer with no fix-role is worse: on FAIL brain re-runs the reviewer, which
+    # BRAIN.md forbids from editing, and the loop counter lives in the branch that
+    # needs a fix-role, so MAX_FIX_LOOPS never stops it.
+    case "$role" in
+      *-reviewer|qa) [ -n "$fix" ] || { echo "err  phase '$phase' runs the review role '$role' with no fix-role — on FAIL brain re-runs the reviewer, which never edits, and MAX_FIX_LOOPS cannot stop it"; bad=1; } ;;
+    esac
+    grep -q "^## $phase\$" "$d/playbook.md" \
+      || { echo "err  phase '$phase' has no '## $phase' section in playbook.md — that section is what brain hands the agent"; bad=1; }
+  done < "$d/phases"
+  local contract
+  for contract in "$d/contracts/"*; do
+    [ -f "$contract" ] || continue
+    phase="${contract##*/}"
+    role="$(awk -v p="$phase" '$1 == p && $1 !~ /^#/ {print $2; exit}' "$d/phases")"
+    if [ -z "$role" ] || [ "$role" = human ]; then
+      echo "err  $contract: contracts require an agent phase; human approval stays in phases"; bad=1
+    fi
+    contract_validate "$contract" || bad=1
+  done
+  check_inputs "$d" || bad=1
+  return $bad
+}
+
+# A playbook's optional `inputs` file types what its brief asks, so the cockpit can ask it
+# as a form: `<input> <type> <per> <need> <label…>`. The label is the brief heading the
+# answer lands under, which is why a per-project input needs that heading in brief.md for
+# `brain new` at a terminal to ask it. Same rules as the cockpit's lint (ui/brain.mjs
+# parseInputs), so the two never disagree about whether a playbook is runnable.
+check_inputs() { # dir -> "err|note" lines; non-zero when any err
+  local d="$1" line n=0 name type per need label kind opts lc heads bad=0 seen=" " labels="|"
+  [ -f "$d/inputs" ] || return 0
+  heads="$(grep '^##' "$d/brief.md" 2>/dev/null | sed 's/^#*[[:space:]]*//; s/[[:space:]]*$//')"
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    read -r name type per need label <<<"$line"
+    label="$(tr -s ' \t' ' ' <<<"$label")"
+    if [ -z "$label" ]; then echo "err  inputs:$n '$name' needs five columns: input type per need label"; bad=1; continue; fi
+    [[ "$name" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || { echo "err  inputs:$n '$name' is not a usable input name — lowercase letters, digits and dashes"; bad=1; }
+    case "$seen" in *" $name "*) echo "err  inputs:$n input '$name' appears twice"; bad=1 ;; esac
+    seen="$seen$name "
+    kind="${type%%:*}"; opts=""; [ "$kind" = "$type" ] || opts="${type#*:}"
+    case "$kind" in
+      text|longtext|url|urls|number|files)
+        [ "$kind" = "$type" ] || { echo "err  inputs:$n '$name': only a choice takes options after ':'"; bad=1; } ;;
+      choice)
+        [ "$(tr ',' '\n' <<<"$opts" | grep -c .)" -ge 2 ] || { echo "err  inputs:$n '$name': a choice needs at least two options, as choice:a,b"; bad=1; } ;;
+      *) echo "err  inputs:$n '$name': type '$type' is not one of text, longtext, url, urls, number, choice, files"; bad=1 ;;
+    esac
+    case "$per" in project|client) ;; *) echo "err  inputs:$n '$name': per is 'project' or 'client', not '$per'"; bad=1 ;; esac
+    case "$need" in yes|no) ;; *) echo "err  inputs:$n '$name': need is 'yes' or 'no', not '$need'"; bad=1 ;; esac
+    case "$label" in *'#'*) echo "err  inputs:$n '$name': a '#' in the label becomes part of the brief heading"; bad=1 ;; esac
+    lc="$(tr '[:upper:]' '[:lower:]' <<<"$label")"
+    case "$labels" in *"|$lc|"*) echo "err  inputs:$n the label '$label' is used twice — both answers would land under one brief heading"; bad=1 ;; esac
+    labels="$labels$lc|"
+    if [ "$per" = project ] && ! grep -qxF -- "$label" <<<"$heads"; then
+      echo "note inputs:$n input '$name' has no '## $label' heading in brief.md — the cockpit adds it to each project's brief, but brain new at a terminal will not ask for it"
+    fi
+  done < "$d/inputs"
+  return $bad
+}
+
+report_playbook() { # dir -> renders findings like brain lint does; 1 when any err
+  local out; out="$(check_playbook "$1")" || true
+  [ -n "$out" ] || return 0
+  echo "$out" | sed 's/^err  /  ✗ /; s/^note /  · /'
+  if echo "$out" | grep -q '^err '; then return 1; fi
+  return 0
+}
+
+install_role() { # name [instructions-file] -> writes roles.conf + roles/<name>.md
+  local rname="$1" src="${2:-}" eng mod eff
+  if role_names | grep -qx "$rname"; then
+    [ -f "$(role_file "$rname")" ] && { info "role '$rname' is already in roles.conf"; return 0; }
+    # Half-declared. The conf line is there, so only the instructions are missing.
+    [ -n "$src" ] || { info "role '$rname' has a line in roles.conf but no instructions: $(role_file "$rname")"; return 1; }
+    case "$(ask "role '$rname' is in roles.conf but has no instructions — write them from this draft? (y/N)")" in
+      y|Y|yes) cp "$src" "$SYS/roles/$rname.md"; info "wrote $SYS/roles/$rname.md"; return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  if [ -n "$src" ]; then
+    case "$(ask "add role '$rname' to the brain? (y/N)")" in y|Y|yes) ;; *) return 1 ;; esac
+  fi
+  eng="$(pick "which engine runs '$rname'?" claude codex)" || return 1
+  mod="$(ask 'model (or default)' default)"
+  eff="$(ask 'reasoning effort (enter = the engine default)')"
+  # Both halves or neither: a role in roles.conf with no instructions file, or the
+  # reverse, is the commonest way a playbook dies on its first run.
+  if [ -n "$src" ]; then cp "$src" "$SYS/roles/$rname.md"
+  else printf '# Role: %s\n%s\n' "$rname" "$(ask 'one line: what this role does')" > "$SYS/roles/$rname.md"; fi
+  printf '%-21s %-8s %-8s %s\n' "$rname" "$eng" "$mod" "$eff" | sed 's/ *$//' >> "$SYS/roles.conf"
+  info "role '$rname' added — $SYS/roles/$rname.md and a line in roles.conf"
+}
+
+drop_draft_sandbox() { # a drafting sandbox is one-shot: ~6s to recreate, and it would
+                       # otherwise sit in `sbx ls` for good. A project's sandbox is
+                       # reused by every phase of that project, so those are kept.
+  [ -n "${SANDBOX:-}" ] || return 0
+  sbx rm --force "$SANDBOX" >/dev/null 2>&1 || info "could not remove the draft sandbox $SANDBOX"
+}
+
+role_by_agent() { # name -> the role-author role drafts the instructions, you install them
+  local name="$1" desc r_engine r_model r_effort
+  desc="$(ask 'what is this role for: which phase, what it is handed, what it must produce')"
+  [ -n "$desc" ] || die "the agent needs a description to work from"
+  read -r r_engine r_model r_effort <<<"$(role_cfg role-author)"
+
+  # One file per role, so drafts do not overwrite each other; only this one is replaced.
+  local draft="$BRAIN/.drafts/role"
+  mkdir -p "$draft"; rm -f "$draft/$name.md"
+  PROJECT="role-draft"
+  local here="$PWD"; cd "$draft"
+  launch "$r_engine" "$r_model" "$r_effort" "You are working inside the agent brain system.
+Brain instructions (read-only): $SYS
+Write only into this directory, to the file '$name.md'. $SYS is read-only.
+
+The role is called '$name'. What the human wants it for:
+$desc" role-author
+  cd "$here"
+  drop_draft_sandbox
+  [ -f "$draft/$name.md" ] || die "the agent wrote no $name.md. Nothing added; the draft is in $draft"
+  echo
+  echo "── the agent drafted ──────────────────────────────"
+  cat "$draft/$name.md"
+  echo "───────────────────────────────────────────────────"
+  local n; n="$(wc -l < "$draft/$name.md" | tr -d ' ')"
+  [ "$n" -le 200 ] || echo "  · $n lines — role files are context, not enforcement, and adherence drops past ~200"
+  install_role "$name" "$draft/$name.md" || die "not added. The draft is still in $draft/$name.md"
+}
+
+cmd_role() {
+  local sub="${1:-}"; shift || true
+  [ "$sub" = new ] || die "usage: brain role new [name]"
+  interactive || die "brain role new asks questions; run it at a terminal"
+  local rname; rname="$(slug "${1:-$(ask 'role name (one word, e.g. seo-auditor)')}")"
+  [ -n "$rname" ] || die "a role needs a name"
+  if role_names | grep -qx "$rname" && [ -f "$(role_file "$rname")" ]; then
+    die "role '$rname' already exists — its instructions are in $SYS/roles/$rname.md"
+  fi
+  role_names | grep -qx "$rname" \
+    && info "role '$rname' is in roles.conf but has no instructions — this writes the missing half"
+  case "$(pick 'write it:' 'yourself, now' 'let an agent draft it')" in
+    'yourself, now')
+      install_role "$rname" || die "not added"
+      echo "  now write what it does: $SYS/roles/$rname.md"
+      echo "  the format it must follow: $SYS/skills/role-format/SKILL.md" ;;
+    *) role_by_agent "$rname" ;;
+  esac
+}
+
+phase_row() { # a 15-char phase name would otherwise run into the role column
+  local p="$1" r="$2" f="${3:-}" w1=15 w2=18
+  [ ${#p} -ge $w1 ] && w1=$(( ${#p} + 1 ))
+  [ ${#r} -ge $w2 ] && w2=$(( ${#r} + 1 ))
+  printf "%-${w1}s%-${w2}s%s\n" "$p" "$r" "$f" | sed 's/ *$//'
+}
+
+playbook_by_hand() { # dir name -> asks for the phases and writes the three files
+  local d="$1" name="$2" desc phase role fix gate n=1
+  local -a roles=(); while IFS= read -r r; do roles+=("$r"); done < <(role_names)
+  roles+=(human)
+  desc="$(ask 'one line describing this path')"
+  echo
+  echo "  Phases, in the order they run. Empty name when you are done."
+  echo "  A phase that reviews earlier work needs a fix-role: brain runs it when the"
+  echo "  review writes RESULT: FAIL, then re-runs the review. Without one it loops."
+  echo
+  phase_row '# phase' role 'fix-role (who fixes when this review FAILs)' > "$d/phases"
+  { echo "# Playbook: $name"; echo "> ${desc:-Describe this dev path in one line.}"; echo
+    echo "What every agent on this path should know before any phase runs."; echo; } > "$d/playbook.md"
+  while :; do
+    phase="$(slug "$(ask "phase $n name (empty = done)")")"
+    [ -n "$phase" ] || break
+    role="$(pick "role for '$phase':" "${roles[@]}")" || break
+    while :; do
+      fix="$(ask "fix-role if '$phase' is a review (enter = it is not)")"
+      [ -z "$fix" ] && break
+      role_names | grep -qx "$fix" && break
+      echo "    no role '$fix'. Known: $(role_names | tr '\n' ' ')"
+    done
+    gate="$(ask "what '$phase' must produce, and its gate (enter = fill in later)")"
+    phase_row "$phase" "$role" "$fix" >> "$d/phases"
+    { echo "## $phase"
+      echo "${gate:-What the '$role' role does here, and the gate it has to pass.}"
+      [ -n "$fix" ] && echo "On RESULT: FAIL the '$fix' role fixes it, then this phase runs again."
+      echo; } >> "$d/playbook.md"
+    n=$((n + 1))
+  done
+  [ "$n" -gt 1 ] || die "a playbook needs at least one phase"
+  cp "$SYS/brief-template.md" "$d/brief.md"
+}
+
+draft_playbook() { # name desc engine model effort [again] -> the playbook-author writes .drafts/playbook/<name>/
+  local name="$1" desc="$2" r_engine="$3" r_model="$4" r_effort="$5" again="${6:-}"
+  # $BRAIN_SYSTEM is mounted read-only into every sandbox so a phase can never rewrite
+  # its own instructions. The draft is therefore written in a scratch workspace, and
+  # the host installs it once you have seen it.
+  # The workspace is the fixed .drafts/playbook: a sandbox's mount is chosen once, at
+  # create time, so this path cannot vary per draft. Each draft gets its own folder
+  # inside it, so two playbooks never write phases/playbook.md over each other and a
+  # draft you declined is still there after the next one.
+  local ws="$BRAIN/.drafts/playbook" draft="$BRAIN/.drafts/playbook/$name" more=""
+  if [ -n "$again" ] && [ -f "$draft/phases" ] && [ -d "$(playbook_dir "$name")" ]; then
+    # An adjustment: the cockpit seeded the draft with the installed playbook. Projects
+    # already ran it, and a renamed phase orphans the files they have for it.
+    more="./$name/ holds the playbook '$name' as it is installed, and projects have run it.
+Read every file there first, then change it as asked below and leave the rest as it
+is. Keep the phase names unless the change is about them: a renamed phase orphans the
+files projects already have for it. When the human names a project, what it produced
+is in $MEM/projects/<project>/: read it, write nothing there.
+"
+  elif [ -n "$again" ] && [ -f "$draft/phases" ]; then
+    # A second round from the cockpit: the author revises what it wrote, it does not
+    # start over, or every round would re-ask the questions the first one settled.
+    more="A draft of it already exists in ./$name/. Read every file there first and change
+it as asked below; do not start over.
+"
+  else
+    # Everything but REQUEST.md. The cockpit reads it as "the author is at work", and
+    # cmd_playbook_draft consumes it once the round is over. Deleted here, the cockpit
+    # called the draft finished and empty while the author was still writing it.
+    [ -d "$draft" ] && find "$draft" -mindepth 1 -maxdepth 1 ! -name REQUEST.md -exec rm -rf {} +
+    mkdir -p "$draft"; cp "$SYS/brief-template.md" "$draft/brief.md"
+  fi
+  mkdir -p "$draft/roles"; rm -f "$draft/.done"
+  PROJECT="playbook-draft"
+  local here="$PWD"; cd "$ws"
+  # Nobody should have to type /exit here either. The author's last write is ./$name/.done
+  # (its role says so); when it lands the sandbox is stopped and the session ends on its
+  # own, as a phase's does. The loop also ends with this script, so a Ctrl-C out of the
+  # session does not leave it polling. BRAIN_AUTOSTOP=0 keeps the session open.
+  local sbname stopper=""; sbname="$(sandbox_name "$r_engine")"
+  if [ "${BRAIN_AUTOSTOP:-1}" = 1 ]; then
+    ( until [ -f "$draft/.done" ]; do sleep 3; kill -0 $$ 2>/dev/null || exit 0; done
+      info "the author is done — closing $sbname"
+      sbx stop "$sbname" >/dev/null 2>&1 || info "could not stop $sbname, type /exit to leave it" ) &
+    stopper=$!
+  fi
+  # No "read your role file" line: the role is already this agent's system prompt
+  # (Claude) or its AGENTS.md (Codex).
+  launch "$r_engine" "$r_model" "$r_effort" "You are working inside the agent brain system.
+Brain instructions (read-only): $SYS
+Write only into the folder ./$name/ here. It already holds a brief.md to start from,
+and ./$name/roles/ is where a role you propose goes. Never write into $SYS, which is
+read-only, and never into the sibling folders here — those are other drafts.
+When you are finished, your last action is the empty file ./$name/.done; it closes this session.
+${more}
+The playbook is called '$name'. The path to design, in the human's words:
+$desc" playbook-author
+  [ -n "$stopper" ] && kill "$stopper" 2>/dev/null
+  rm -f "$draft/.done"
+  cd "$here"
+  drop_draft_sandbox
+  # If it wrote to the workspace root anyway, keep the work instead of making the
+  # human move files by hand.
+  if [ ! -f "$draft/phases" ] && [ -f "$ws/phases" ]; then
+    info "the agent wrote to the workspace root — moving those files into $name/"
+    local f
+    for f in phases playbook.md brief.md; do [ -f "$ws/$f" ] && mv "$ws/$f" "$draft/$f"; done
+    if [ -d "$ws/roles" ]; then mv "$ws"/roles/*.md "$draft/roles/" 2>/dev/null; rmdir "$ws/roles" 2>/dev/null; fi
+  fi
+  [ -f "$draft/phases" ]
+}
+
+# `brain playbook draft <name>`: the cockpit's route to the author. The description is
+# .drafts/playbook/<name>/REQUEST.md, written by the cockpit's Draft button, and `brain
+# watch` opens this in a Terminal window. The author still asks its questions there. No
+# install prompt: the cockpit shows the draft, takes the engine and model for each role
+# it proposes, and installs it — that is where the human sees it. REQUEST.md is consumed,
+# which is how the cockpit knows the round is over.
+cmd_playbook_draft() {
+  local name="${1:-}" draft req desc r_engine r_model r_effort again=""
+  [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "usage: brain playbook draft <name>"
+  draft="$BRAIN/.drafts/playbook/$name"; req="$draft/REQUEST.md"
+  # An installed playbook is drafted only as an adjustment, which the cockpit seeds.
+  [ -d "$(playbook_dir "$name")" ] && [ ! -f "$draft/phases" ] && die "playbook '$name' already exists — adjust it from its page in the cockpit"
+  [ -s "$req" ] || die "no request at $req — the cockpit writes it when you press Draft"
+  desc="$(cat "$req")"
+  [ -f "$draft/phases" ] && again=1
+  read -r r_engine r_model r_effort <<<"$(role_cfg playbook-author)"
+  local rc=0
+  draft_playbook "$name" "$desc" "$r_engine" "$r_model" "$r_effort" "$again" || rc=1
+  rm -f "$req"
+  [ "$rc" = 0 ] || die "the agent wrote no phases file. The draft folder is $draft"
+  echo
+  echo "── the agent drafted ──────────────────────────────"
+  cat "$draft/phases"
+  sed -n '1,4p' "$draft/playbook.md"
+  echo "───────────────────────────────────────────────────"
+  report_playbook "$draft" || true
+  info "the cockpit shows this draft and installs it: Playbooks → drafts → $name"
+}
+
+playbook_by_agent() { # dir name [engine] [model] [effort] -> playbook-author drafts it
+  local d="$1" name="$2" engine="${3:-}" model="${4:-}" effort="${5:-}"
+  local desc r_engine r_model r_effort
+  desc="$(ask 'describe the path: what work, in what order, and what must be checked')"
+  [ -n "$desc" ] || die "the agent needs a description to work from"
+  # roles.conf holds the default, as it does for every role; a flag or an answer here
+  # overrides it for this one draft, the way `brain run --model` does for one phase.
+  # The format rules are not here either — they are the playbook-format skill.
+  read -r r_engine r_model r_effort <<<"$(role_cfg playbook-author)"
+  while [ -z "$engine" ]; do
+    engine="$(ask 'engine' "$r_engine")"
+    case "$engine" in claude|codex) ;; *) echo "    claude or codex"; engine="" ;; esac
+  done
+  [ -n "$model" ]  || model="$(ask 'model (or default)' "$r_model")"
+  [ -n "$effort" ] || effort="$(ask 'reasoning effort (enter = the engine default)' "$r_effort")"
+  local draft="$BRAIN/.drafts/playbook/$name"
+  draft_playbook "$name" "$desc" "$engine" "$model" "$effort" \
+    || die "the agent wrote no phases file. Nothing installed; the draft is in $draft"
+  echo
+  echo "── the agent drafted ──────────────────────────────"
+  cat "$draft/phases"
+  sed -n '1,4p' "$draft/playbook.md"
+  echo "───────────────────────────────────────────────────"
+  # A role it proposed rather than invented. Two halves the human has to agree to,
+  # and installing them first is what lets the check below come back clean.
+  local r
+  for r in "$draft"/roles/*.md; do
+    [ -e "$r" ] || continue
+    echo
+    echo "── it proposes a role: $(basename "$r" .md) ──────────"
+    cat "$r"
+    echo "───────────────────────────────────────────────────"
+    install_role "$(basename "$r" .md)" "$r" || info "skipped — the playbook will fail its check until that role exists"
+  done
+  report_playbook "$draft" || echo "  (install anyway and fix by hand, or answer n and re-run)"
+  case "$(ask "install as system/playbooks/$name? (y/N)")" in
+    y|Y|yes) cp -R "$draft/." "$d/"; rm -rf "$d/roles" ;;
+    *) die "not installed. The draft is still in $draft" ;;
+  esac
+}
+
+cmd_playbook_new() {
+  interactive || die "brain playbook new asks questions; run it at a terminal"
+  local name="" engine="" model="" effort=""
+  if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then name="$1"; shift; fi
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --engine) engine="$2"; shift 2 ;;
+      --model)  model="$2";  shift 2 ;;
+      --effort) effort="$2"; shift 2 ;;
+      *) die "unknown option $1 (--engine, --model and --effort apply to the agent draft)" ;;
+    esac
+  done
+  name="$(slug "${name:-$(ask 'playbook name (one word, e.g. content-refresh)')}")"
+  [ -n "$name" ] || die "a playbook needs a name"
+  [ -d "$(playbook_dir "$name")" ] && die "playbook '$name' already exists"
+
+  # Built in a temp dir and moved on success, so an abandoned session leaves nothing.
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/brain-playbook.XXXXXX")"   # global: the EXIT trap reads it
+  trap 'rm -rf "${tmp:-}"' EXIT
+  local -a routes=()
+  [ -n "$(names_in "$BRAIN/examples/playbooks")" ] && routes+=('a worked example')
+  routes+=('phases you name yourself' 'a draft by an agent')
+  case "$(pick 'start from:' "${routes[@]}")" in
+    'a worked example')
+      local -a ex=(); while IFS= read -r x; do ex+=("$x"); done < <(names_in "$BRAIN/examples/playbooks")
+      local from; from="$(pick 'copy which example?' "${ex[@]}")" || die "nothing chosen"
+      cp -R "$BRAIN/examples/playbooks/$from/." "$tmp/"
+      local desc; desc="$(ask 'one line describing this path (enter = keep the example one)')"
+      # retitle, and replace the '> ' line brain playbooks prints, keeping everything else
+      awk -v n="$name" -v d="$desc" 'NR == 1 { print "# Playbook: " n; next }
+        d != "" && !seen && /^> / { print "> " d; seen = 1; next } { print }' \
+        "$tmp/playbook.md" > "$tmp/md" && mv "$tmp/md" "$tmp/playbook.md"
+      info "copied $from — its phases and sections are yours to edit"
+      ;;
+    'phases you name yourself') playbook_by_hand "$tmp" "$name" ;;
+    *)                          playbook_by_agent "$tmp" "$name" "$engine" "$model" "$effort" ;;
+  esac
+
+  mkdir -p "$SYS/playbooks/$name"
+  cp -R "$tmp/." "$SYS/playbooks/$name/"
+  local dir="$SYS/playbooks/$name"
+  echo
+  if report_playbook "$dir"; then
+    info "playbook '$name' is ready"
+  else
+    echo "  fix the ✗ lines in $dir, then: brain playbook check $name"
+  fi
+  echo "  phases:  $dir/phases"
+  echo "  what each phase does: $dir/playbook.md"
+  echo "  brief the human fills in: $dir/brief.md"
+  echo "  use it:  brain new $name <project-name>"
+  echo "  system/ is not auto-committed — keep it with: git -C $BRAIN add system/playbooks/$name"
+}
+
+# ---------- learning from a playbook's runs ----------------------------------
+# Counting is the host's job and judging is the agent's. The numbers below come from the
+# marker files and run records the launcher itself wrote — the host verdicts in .runs/ are
+# not even mounted into a sandbox — so every run of a playbook is scored by the same
+# arithmetic, and "did the last evolve help" is a comparison, not a recollection.
+playbook_projects() { # playbook -> the projects that ran at least one of its phases, newest first
+  local env dir
+  for env in "$MEM"/projects/*/project.env; do
+    [ -f "$env" ] || continue
+    dir="$(dirname "$env")"
+    [ "$(awk -F= '$1 == "PLAYBOOK" { print $2 }' "$env" | tr -d "\"'")" = "$1" ] || continue
+    compgen -G "$dir/phases/*.done" >/dev/null || continue
+    printf '%s %s\n' "$(awk -F= '$1 == "CREATED" { print $2 }' "$env" | tr -d "\"'")" "$(basename "$dir")"
+  done | sort -r | awk '{ print $NF }'
+}
+
+playbook_in_flight() { # playbook -> the projects partway through it: a phase done, not all
+  local p ph
+  while read -r p; do
+    while read -r ph _; do
+      [ -f "$MEM/projects/$p/phases/$ph.done" ] || { echo "$p"; break; }
+    done < <(awk '$1 !~ /^#/ && NF >= 2' "$(playbook_dir "$1")/phases")
+  done < <(playbook_projects "$1")
+}
+
+scorecard() { # project playbook -> a markdown table, one row per phase
+  local project="$1" pdir="$MEM/projects/$1" phase role runs mins fails through shipped failed f
+  local rj rr blocks=0
+  # "—" is "not recorded", never zero: a project older than a record format has none of
+  # it, and a zero there would read as a phase that did nothing wrong.
+  for f in "$pdir"/phases/*.md; do defects_has "$f" && blocks=1; done
+  echo "### $project"
+  echo "| phase | role | agent runs | minutes | FAIL rounds | findings it let through | shipped open / waived / deferred | attempts the host rejected |"
+  echo "|---|---|---|---|---|---|---|---|"
+  while read -r phase role _; do
+    rj=("$pdir/phases/$phase.runs"/*.json); runs="—"; mins="—"
+    if [ -e "${rj[0]}" ]; then
+      runs=${#rj[@]}
+      mins="$(grep -ho '"seconds": *[0-9]*' "${rj[@]}" | awk -F: '{ s += $2 } END { printf "%d", s / 60 }')"
+    fi
+    fails="$(fail_rounds "$pdir/phases/$phase.log")"
+    # A finding a later phase raised that names this one as where it should have been
+    # caught (BRAIN.md, `escaped: <phase>`), counted once however many summaries carry it.
+    through="—"
+    [ "$blocks" = 1 ] && through="$(for f in "$pdir"/phases/*.md; do defects_block "$f"; done \
+      | grep -E "escaped: $phase([^a-z0-9-]|\$)" | awk '{ print $2 }' | sort -u | grep -c . || true)"
+    shipped="—"
+    defects_has "$pdir/phases/$phase.md" && shipped="$(defects_block "$pdir/phases/$phase.md" \
+      | awk '{ n[$3]++ } END { printf "%d / %d / %d", n["OPEN"], n["WAIVED"], n["DEFERRED"] }')"
+    # Attempts that did not hand off: timed out, crashed, rejected by verification or
+    # the defect rules. Human verdicts are records here too, and already FAIL rounds.
+    # Older runs predate host records, and "—" says so rather than claim zero.
+    rr=("$BRAIN/.runs/$project/$phase"/*/result.json); failed="—"
+    [ -e "${rr[0]}" ] && failed="$(grep -ho '"outcome":"[a-z_]*"' "${rr[@]}" \
+      | grep -cvE '"(handoff_valid|verified|approved|rejected|reopened)"' || true)"
+    echo "| $phase | $role | $runs | $mins | $fails | $through | $shipped | $failed |"
+  done < <(awk '$1 !~ /^#/ && NF >= 2' "$(playbook_dir "$2")/phases")
+}
+
+# `brain playbook analyse <name>`, step one of making a playbook's next run better than
+# its last: the host scores every project that ran it, and the playbook-analyst —
+# system/ read-only, like any phase — writes the diagnosis and files proposals. That is
+# all it does. Step two is yours and separate: accept or decline each proposal, then
+# `brain evolve` applies what you accepted and nothing else.
+cmd_playbook_analyse() {
+  local name="" engine="" model="" effort="" p cards="" before new
+  local projects=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --engine) engine="$2"; shift 2 ;;
+      --model)  model="$2";  shift 2 ;;
+      --effort) effort="$2"; shift 2 ;;
+      -*) die "unknown option $1" ;;
+      *) name="$1"; shift ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: brain playbook analyse <name>"
+  [ -f "$(playbook_dir "$name")/phases" ] || die "no playbook '$name'"
+  while read -r p; do projects+=("$p"); done < <(playbook_projects "$name")
+  [ ${#projects[@]} -gt 0 ] || die "no project has finished a phase of '$name' yet — there is no run to learn from"
+  for p in "${projects[@]}"; do cards+="$(scorecard "$p" "$name")"$'\n\n'; done
+  printf '%s' "$cards"
+
+  local r_engine r_model r_effort
+  read -r r_engine r_model r_effort <<<"$(role_cfg playbook-analyst)"
+  [ -n "$engine" ] || engine="$r_engine"; [ -n "$model" ] || model="$r_model"
+  [ -n "$effort" ] || effort="$r_effort"
+  before="$(proposals_section Open)"
+  # A scratch workspace like the drafting commands: memory/ is mounted read-write and
+  # system/ read-only by ensure_sandbox, and the analysis needs nothing else.
+  PROJECT="playbook-analysis"
+  local ws="$BRAIN/.drafts/analysis" here="$PWD"
+  mkdir -p "$ws"; cd "$ws"
+  launch "$engine" "$model" "$effort" "You are working inside the agent brain system.
+Brain instructions (read-only): $SYS
+Brain memory (read-write):      $MEM
+First read $SYS/BRAIN.md and follow it.
+
+Analyse the playbook '$name' ($(playbook_dir "$name")/) from the projects that ran it,
+newest first: ${projects[*]}. Each one's record is $MEM/projects/<project>/.
+
+The host counted these from the marker files and its own run records, some of which
+you cannot see from inside the sandbox. Use them as they are:
+
+$cards" playbook-analyst
+  cd "$here"
+  drop_draft_sandbox
+  commit_memory "playbook $name analysis"
+
+  new="$(comm -13 <(printf '%s\n' "$before" | sort) <(proposals_section Open | sort) | grep '^- ' || true)"
+  echo
+  if [ -n "$new" ]; then
+    info "$(printf '%s\n' "$new" | grep -c .) new proposal(s) for $name:"
+    printf '%s\n' "$new" | cut -c1-220 | awk '{ printf "  %d. %s\n", NR, substr($0, 3) }'
+  else
+    info "no new proposals — see $MEM/knowledge/playbook-$name.md for the analysis"
+  fi
+  [ -n "$new" ] || return 0
+  echo
+  echo "  next, choose: Accept or Decline each one on the playbook's page in the cockpit"
+  echo "  (or move its line under ## Accepted / ## Declined in memory/proposals.md), then"
+  echo "  apply what you accepted:  brain playbook evolve $name"
+}
+
+# `brain playbook evolve <name>`: `brain evolve`, held to one playbook. Only the accepted
+# proposals that change it or its roles are applied; the rest wait for their own run.
+# With several playbooks that is the difference that matters — one can be improved
+# while another has a project partway through it.
+cmd_playbook_evolve() {
+  local name="" args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --engine|--model|--effort) args+=("$1" "$2"); shift 2 ;;
+      -*) die "unknown option $1" ;;
+      *) [ -z "$name" ] || die "usage: brain playbook evolve <name>"; name="$1"; shift ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: brain playbook evolve <name>"
+  cmd_evolve --playbook "$name" ${args[@]+"${args[@]}"}
+}
+
+cmd_playbook() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    new)   cmd_playbook_new "$@" ;;
+    draft) cmd_playbook_draft "$@" ;;
+    analyse|analyze) cmd_playbook_analyse "$@" ;;
+    evolve) cmd_playbook_evolve "$@" ;;
+    check)
+      local n="${1:-}"; [ -n "$n" ] || die "usage: brain playbook check <name>"
+      [ -d "$(playbook_dir "$n")" ] || die "no playbook '$n'"
+      local out; out="$(check_playbook "$(playbook_dir "$n")")" || true
+      [ -z "$out" ] && { info "playbook '$n' is consistent"; return 0; }
+      report_playbook "$(playbook_dir "$n")" ;;
+    *) die "usage: brain playbook new [name] | brain playbook draft <name> | brain playbook check <name> | brain playbook analyse <name> | brain playbook evolve <name>" ;;
+  esac
+}
+
+# ---------- the brief -------------------------------------------------------
+# A brief nobody fills in is how a path starts wrong: phase one guesses, or stops to
+# go looking for the human. So `brain new` offers to fill it rather than printing a
+# path to an editor and hoping.
+# Every heading is a question, `###` included — a playbook's own brief puts real
+# questions (brand source, locales) in subsections, and asking once for the parent
+# would collapse three answers into one.
+
+brief_sections() { grep '^##' "$1"; }   # the heading lines, verbatim
+
+brief_question() { # heading brief-file -> the section's own comment, as written
+  # The template already phrased the question, option lists and all. Show it that way
+  # instead of flattening it: half of these are a choice between named values.
+  brief_body "$1" "$2" | sed 's/<!--//; s/-->//' \
+    | grep -v '^[[:space:]]*-\{0,1\}[[:space:]]*$' | sed 's/^/    /'
+}
+
+fill_brief() { # brief-file [what happens to a skipped one] -> one question per heading; a blank answer changes nothing
+  local bf="$1" out head ans n=0 total
+  total="$(brief_sections "$bf" | wc -l | tr -d ' ')"
+  out="$(mktemp "${TMPDIR:-/tmp}/brain-brief.XXXXXX")"
+  echo
+  echo "  One line each, enter to skip. What you skip stays a question in the file,"
+  echo "  ${2:-and phase one asks you for it — so skipping is a real answer here.}"
+  awk '/^##/ { exit } { print }' "$bf" > "$out"   # the title, whatever it says
+  while IFS= read -r head <&3; do
+    echo
+    brief_question "$head" "$bf"
+    ans="$(ask "${head##*# }")"
+    # Answered: the question has done its job, drop it. Skipped: the section stays
+    # exactly as the playbook shipped it, so the next reader gets the question.
+    if [ -n "$ans" ]; then printf '%s\n%s\n\n' "$head" "$ans" >> "$out"; n=$((n + 1))
+    else { printf '%s\n' "$head"; brief_body "$head" "$bf"; } >> "$out"; fi
+  # The headings come in on fd 3: on stdin, `ask` would read its answers from this list
+  # instead of the keyboard, and every section would be "answered" with the next heading.
+  done 3< <(brief_sections "$bf")
+  mv "$out" "$bf"
+  info "$(basename "$bf" .md): $n of $total sections answered"
+}
+
+cmd_new() {
+  local playbook="" name="" dir="" client=""
+  local usage="usage: brain new [<playbook> <name>] [--dir PATH] [--client SLUG]   (asks for what you leave out)"
+  if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then playbook="$1"; shift; fi
+  if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then name="$1"; shift; fi
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dir) dir="$2"; shift 2 ;;
+      --client) clients_on || die "a client is the clients app's: brain app install clients"; client="$(slug "$2")"; shift 2 ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
+
+  if [ -z "$playbook" ]; then
+    interactive || die "$usage"
+    local -a pbs=(); while IFS= read -r x; do pbs+=("$x"); done < <(all_in playbooks)
+    if [ ${#pbs[@]} -eq 0 ]; then
+      # system/playbooks ships empty on purpose, so the first run has nothing to pick.
+      echo "No playbooks yet — a playbook is how your team works, so you write your own."
+      if [ -n "$(names_in "$BRAIN/examples/playbooks")" ]; then
+        echo "Start from a worked example (edit or delete it later):"
+        playbook="$(copy_example)" || die "nothing to start from"
+      else
+        die "write one first: brain playbook new"
+      fi
+    else
+      playbook="$(pick 'playbook:' "${pbs[@]}")" || die "nothing chosen"
+    fi
+  fi
+  [ -d "$(playbook_dir "$playbook")" ] || die "unknown playbook '$playbook'. Options:$(echo; cmd_playbooks)"
+
+  if [ -z "$name" ]; then
+    interactive || die "$usage"
+    name="$(ask 'project name')"
+    [ -n "$name" ] || die "a project needs a name"
+  fi
+  if [ -z "$dir" ]; then
+    dir="$DEV/$name"
+    # Existing code (rebuild, feature, audit) lives elsewhere; this is where you say so.
+    interactive && dir="$(ask 'code directory' "$dir")"
+  fi
+  # Only playbooks with a client role keep memory/clients/<slug>/; don't ask the rest.
+  if [ -z "$client" ] && clients_on && interactive && grep -q client-profiler "$(playbook_dir "$playbook")/phases" 2>/dev/null; then
+    client="$(slug "$(ask 'client slug (enter to skip)')")"
+  fi
+  local pname; pname="$(slug "$(basename "$dir")")"
+  local pdir="$MEM/projects/$pname"
+  [ -e "$pdir/project.env" ] && die "project '$pname' already exists in memory"
+
+  # Playbooks with a code template: clone it fresh, drop its history, start a new repo.
+  local TEMPLATE_REPO="" TEMPLATE_BRANCH="" tpl_sha=""
+  # shellcheck disable=SC1090
+  [ -f "$(playbook_dir "$playbook")/playbook.env" ] && source "$(playbook_dir "$playbook")/playbook.env"
+  if [ -n "$TEMPLATE_REPO" ]; then
+    [ ! -e "$dir" ] || [ -z "$(ls -A "$dir")" ] || die "$dir is not empty; the template needs an empty folder"
+    info "cloning template $TEMPLATE_REPO${TEMPLATE_BRANCH:+ ($TEMPLATE_BRANCH)}"
+    git clone -q --depth 1 ${TEMPLATE_BRANCH:+--branch "$TEMPLATE_BRANCH"} "$TEMPLATE_REPO" "$dir"
+    tpl_sha="$(git -C "$dir" rev-parse --short HEAD)"
+    rm -rf "$dir/.git"
+    git -C "$dir" init -q
+    git -C "$dir" add -A
+    git -C "$dir" commit -qm "Start from template ${TEMPLATE_REPO##*/}@$tpl_sha"
+  fi
+  # No `git init` here: the repo goes where the code is. A template's clone is that
+  # already; otherwise the phase that writes the code makes it — redesign-website keeps
+  # crawl/, brandkit/ and design/ beside its site, and only the site folder is a repo.
+  mkdir -p "$dir"
+
+  mkdir -p "$pdir/phases" "$pdir/qa" "$pdir/sources"
+  {
+    printf 'PLAYBOOK=%s\nPROJECT_DIR=%s\nCREATED=%s\n' "$playbook" "$dir" "$(date +%F)"
+    [ -n "$client" ] && printf 'CLIENT=%s\n' "$client"
+    [ -n "$tpl_sha" ] && printf 'TEMPLATE=%s@%s\n' "$TEMPLATE_REPO" "$tpl_sha"
+  } > "$pdir/project.env"
+  if [ -n "$client" ]; then
+    mkdir -p "$MEM/clients/$client"
+    [ -f "$MEM/clients/$client/profile.md" ] || printf '# Client: %s\n\n<!-- Filled in by the client-profiler role. -->\n' "$client" > "$MEM/clients/$client/profile.md"
+  fi
+  if [ -f "$(playbook_dir "$playbook")/brief.md" ]; then
+    cp "$(playbook_dir "$playbook")/brief.md" "$pdir/brief.md"
+  else
+    cp "$SYS/brief-template.md" "$pdir/brief.md"
+  fi
+  : > "$pdir/decisions.md"
+
+  # Three ways in, and the agent one is not a new code path: phase one of a playbook
+  # that starts with an intake role already reads the brief and asks for the rest.
+  local first_phase first_role run_now=""
+  read -r first_phase first_role _ < <(awk '$1 !~ /^#/ && NF >= 2 { print; exit }' "$(playbook_dir "$playbook")/phases") || true
+  if interactive && [ -n "$(brief_sections "$pdir/brief.md")" ]; then
+    echo
+    local -a how=('here in the terminal')
+    [ "$first_role" = human ] || how+=("with the '$first_phase' agent ($first_role) — it asks, then writes the brief")
+    how+=('later, by hand')
+    case "$(pick 'fill in the brief:' "${how[@]}")" in
+      'here in the terminal') fill_brief "$pdir/brief.md" ;;
+      "with the '"*)          run_now=1 ;;
+    esac
+  fi
+  commit_memory "new $pname ($playbook)"
+  info "project '$pname' created"
+  echo "  code:   $dir${tpl_sha:+   (from template @$tpl_sha)}"
+  [ -n "$client" ] && echo "  client: $MEM/clients/$client/profile.md"
+  echo "  brief:  $pdir/brief.md"
+  if [ -n "$run_now" ]; then
+    # From $dir, so the phase's sandbox mounts the project the way every later run does.
+    cd "$dir"; cmd_run
+  else
+    echo "  then:   cd $dir && brain run   ('$first_phase' reads the brief)"
+  fi
+}
+
+# The brain's own maintenance pass, and the one command that may write $BRAIN_SYSTEM.
+# Every phase gets system/ mounted :ro so an agent can never rewrite the instructions it
+# is running under. That property is worth keeping, and it is also why proposals pile up
+# unapplied: the agents that learn the lesson are the ones that cannot act on it. So the
+# exception is a separate command, run by you, outside any playbook, in its own sandbox.
+# It edits in place rather than drafting a copy: the brain is a git repo, so `git diff`
+# is the review and `git checkout system/` is the undo, and a diff you already know how
+# to read beats a bespoke approval prompt.
+cmd_evolve() {
+  local engine="" model="" effort="" ask="" playbook=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --engine) engine="$2"; shift 2 ;;
+      --model)  model="$2";  shift 2 ;;
+      --effort) effort="$2"; shift 2 ;;
+      --playbook) playbook="$2"; shift 2 ;;   # what `brain playbook evolve <name>` passes
+      *) ask="${ask:+$ask }$1"; shift ;;
+    esac
+  done
+  [ -z "$ask" ] || [ -z "$playbook" ] || die "name the change or the playbook, not both"
+  git -C "$BRAIN" diff --quiet -- system 2>/dev/null \
+    || info "⚠ system/ has uncommitted changes — commit them first or you cannot tell yours from the agent's"
+
+  # The gate. Naming the change yourself IS the approval, so `brain evolve "..."` needs
+  # no queue. Working the queue does: only what you moved under `## Accepted` is work,
+  # and an empty section means there is nothing to run rather than "use your judgement".
+  # `brain playbook evolve` holds the queue to one playbook's lines, and the rest wait.
+  local accepted="" all_before="" open_before="" pb busy
+  if [ -z "$ask" ]; then
+    all_before="$(proposals_section Accepted)"; accepted="$all_before"
+    if [ -n "$playbook" ]; then
+      [ -f "$(playbook_dir "$playbook")/phases" ] || die "no playbook '$playbook'"
+      accepted="$(printf '%s\n' "$all_before" | targets_playbook "$playbook")"
+      [ -n "$accepted" ] || die "nothing accepted for playbook '$playbook'. Accept its proposals on its page in the cockpit, or move them under '## Accepted' in memory/proposals.md"
+    fi
+    [ -n "$accepted" ] || die "nothing accepted in memory/proposals.md. Move the lines you want applied under '## Accepted' — that move is the approval. Or name the change yourself: brain evolve \"what to change\""
+    info "$(printf '%s\n' "$accepted" | wc -l | tr -d ' ') accepted proposal(s)${playbook:+ for $playbook}"
+    # A project partway through a playbook runs each remaining phase under whatever the
+    # playbook says when that phase starts, and a renamed phase orphans the files it had.
+    for pb in $(all_in playbooks); do
+      [ -n "$(printf '%s\n' "$accepted" | targets_playbook "$pb")" ] || continue
+      busy="$(playbook_in_flight "$pb" | tr '\n' ' ')"
+      [ -n "$busy" ] || continue
+      info "⚠ partway through $pb: ${busy% } — the rest of its phases will run under the edited playbook, and a renamed phase orphans its files"
+      if interactive; then
+        case "$(ask 'apply anyway? (y/N)')" in y|Y|yes) ;; *) die "stopped — nothing changed" ;; esac
+      fi
+    done
+  fi
+  # Read before the run so the check afterwards has something to compare against.
+  open_before="$(proposals_section Open)"
+
+  local r_engine r_model r_effort
+  read -r r_engine r_model r_effort <<<"$(role_cfg system-editor)"
+  [ -n "$engine" ] || engine="$r_engine"; [ -n "$model" ] || model="$r_model"
+  [ -n "$effort" ] || effort="$r_effort"
+
+  PROJECT="brain-self"; BRAIN_SELF=1; export BRAIN_SELF
+  local here="$PWD"; cd "$BRAIN"
+  launch "$engine" "$model" "$effort" "You are working inside the agent brain system, on the brain itself.
+
+The working directory is the brain repo. Unlike every other run, \`system/\` is
+WRITABLE here and changing it is the job. \`memory/\` is writable too.
+
+${ask:-The queue is the lines the human moved under '## Accepted' in memory/proposals.md${playbook:+ that change the playbook '$playbook'}:
+
+$accepted
+
+Apply those and nothing else.${playbook:+ The other lines under '## Accepted' are approved
+for other playbooks and wait for their own run: leave them exactly as they are, where
+they are.} A line still under '## Open' has not been approved: do
+not act on it, and do not delete or rewrite it. If an accepted proposal turns out not
+to be supportable, move that line back under '## Open' with your reason appended,
+rather than applying it anyway or dropping it.}" system-editor
+  cd "$here"
+  # Prefer a check to an exhortation — the rule the system-editor role is held to, and
+  # this is the one run nobody watches line by line. A line gone from `## Open` was
+  # acted on without approval; a line moved back from Accepted only ever adds to Open.
+  local taken
+  taken="$(comm -23 <(printf '%s\n' "$open_before" | sort) <(proposals_section Open | sort) | grep '^- ' || true)"
+  if [ -n "$taken" ]; then
+    echo
+    info "⚠ these lines left '## Open' but were never accepted — check the diff before keeping it:"
+    printf '%s\n' "$taken" | sed 's/^/    /'
+  fi
+  # And a playbook's run must leave the other playbooks' accepted lines where they were.
+  local waiting
+  [ -z "$playbook" ] || waiting="$(comm -23 <(printf '%s\n' "$all_before" | sort) <(printf '%s\n' "$accepted" | sort) \
+    | comm -23 - <(proposals_section Accepted | sort) | grep '^- ' || true)"
+  if [ -n "${waiting:-}" ]; then
+    echo
+    info "⚠ these were accepted for other playbooks and are no longer under '## Accepted' — check the diff before keeping it:"
+    printf '%s\n' "$waiting" | sed 's/^/    /'
+  fi
+  # Not kept. Every other sandbox is worth reusing; a sandbox that can rewrite the
+  # brain's own instructions is not one to leave sitting in `sbx ls` between edits.
+  drop_draft_sandbox
+  echo
+  commit_memory "evolve"
+  git -C "$BRAIN" --no-pager diff --stat -- system || true
+  echo
+  echo "  review:  git -C $BRAIN diff system"
+  echo "  undo:    git -C $BRAIN checkout -- system"
+  echo "  keep:    git -C $BRAIN commit -m 'system: ...' -- system"
+  # Installed apps are not in git: what this run changed in one is this brain's own copy.
+  local a
+  for a in $(names_in "$SYS/apps"); do
+    [ -n "$(app_changes "$a")" ] && echo "  app $a differs from its installed version (stays on this machine): brain app diff $a · undo: brain app revert $a"
+  done
+  return 0
+}
+
+cmd_status() {
+  load_project
+  sweep_stale "$PROJECT" "$PDIR"
+  echo "project: $PROJECT   playbook: $PLAYBOOK"
+  local phase role mark counts
+  while read -r phase role _; do
+    mark="·"
+    [ -f "$PDIR/phases/$phase.done" ] && mark="✓"
+    [ ! -f "$PDIR/phases/$phase.done" ] && verdict_is FAIL "$PDIR/phases/$phase.md" && mark="✗"
+    # Last, so it wins over ✗: a failed review with an agent inside it is a fix round
+    # in progress, not something waiting on you.
+    [ ! -f "$PDIR/phases/$phase.done" ] && [ -f "$PDIR/phases/$phase.running" ] && mark="▸"
+    # What the phase's findings came to. Waived and deferred ones are what the project
+    # ships with, so they are said at every status rather than found in a summary.
+    counts="$(defects_block "$PDIR/phases/$phase.md" | awk '{ n[$3]++ } END { split("OPEN WAIVED DEFERRED", k, " "); for (i = 1; i <= 3; i++) if (n[k[i]]) printf "%s%d %s", (o++ ? ", " : ""), n[k[i]], tolower(k[i]) }')"
+    printf '  %s %-16s %s%s\n' "$mark" "$phase" "$role" "${counts:+   ($counts)}"
+  done < <(phase_lines)
+  local n; n="$(next_phase)"
+  if [ -n "$n" ] && fix_pending "$n"; then
+    echo "next: $n failed — 'brain run' sends the fix-role '$(phase_field "$n" 3)' back in with the fix list, then re-runs the review. 'brain auto' does both without stopping."
+  else
+    echo "next: ${n:-nothing — playbook complete}"
+  fi
+}
+
+cmd_run() {
+  load_project
+  sweep_stale "$PROJECT" "$PDIR"
+  # How this run ended, for `brain auto` to act on: "" ran normally, "gate" stopped at a
+  # human phase, "timeout" was killed by the ceiling. A global because the return code is
+  # already spoken for (1 = playbook complete) and auto needs to tell those apart.
+  RUN_STATUS=""
+  local phase="" engine="" model="" effort=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --engine) engine="$2"; shift 2 ;;
+      --model)  model="$2";  shift 2 ;;
+      --effort) effort="$2"; shift 2 ;;
+      -*) die "unknown option $1" ;;
+      *) phase="$1"; shift ;;
+    esac
+  done
+  [ -n "$phase" ] || phase="$(next_phase)"
+  [ -n "$phase" ] || { info "playbook complete for $PROJECT — learn from it: brain playbook analyse $PLAYBOOK"; return 1; }
+  local role fix_role
+  role="$(phase_field "$phase" 2)"
+  fix_role="$(phase_field "$phase" 3)"
+  [ -n "$role" ] || die "phase '$phase' not in playbook '$PLAYBOOK'"
+  # One agent per project at a time: phases share the sandbox and the marker files.
+  local held; held="$(live_leases "$PROJECT" "$PDIR")"
+  [ -z "$held" ] || die "$PROJECT already has a phase running ($held). Wait for it, or stop it with Ctrl-C in its terminal."
+  local contract="$(playbook_dir "$PLAYBOOK")/contracts/$phase"
+  if [ -f "$contract" ]; then
+    [ "$role" != human ] || die "contracts belong to agent phases; human approval stays in phases"
+    contract_validate "$contract" || die "invalid contract for '$phase'; agent not started"
+  fi
+
+  local md="$PDIR/phases/$phase.md" task run_mode=work
+  if [ -n "$fix_role" ] || [[ "$role" = *-reviewer ]] || [ "$role" = qa ]; then run_mode=review; fi
+  # Review phase that failed and hasn't been fixed yet -> run its fix phase's role.
+  if fix_pending "$phase"; then
+    run_mode=fix
+    local fails open; fails="$(fail_rounds "$PDIR/phases/$phase.log")"; open="$(open_rounds "$PDIR/phases/$phase.log")"
+    [ "$role" = "human" ] || [ "$open" -lt "$MAX_FIX_LOOPS" ] || die "'$phase' failed $open times since it last passed. Read $md and decide: fix it in a session (brain open), then touch $PDIR/phases/$phase.fixed and run again, or accept it: touch $PDIR/phases/$phase.done"
+    role="$fix_role"
+    task="Fix round $fails for review phase '$phase'. Read the numbered fix list in $md and fix every item as the role '$role'. Do not mark anything as done, and do not write $md — it is the reviewer's file, and touching it restarts this round. When all items are addressed, write one line per item saying what you changed to $PDIR/phases/$phase.fixed, naming each OPEN defect id from the summary's ## Defects block on its line — the host rejects a fix handoff that leaves one out. Creating that file is what tells brain the round is done, and it is what the reviewer reads next."
+    info "review '$phase' failed -> fixing with role '$role'"
+  else
+    task="Run phase '$phase' of playbook '$PLAYBOOK' as the role '$role'.
+Follow $(role_file "$role") and the '$phase' section of $(playbook_dir "$PLAYBOOK")/playbook.md.
+When this phase's own work is complete: write your summary to $md and create $PDIR/phases/$phase.done (see BRAIN.md for review phases). A human gate that follows this phase is a separate phase: do not wait for its approval, because this .done is what hands your work to it."
+    # A fix round has landed since the last review: say so, or the reviewer re-reviews
+    # cold and never learns which of its own items the fixer says it addressed.
+    [ "$PDIR/phases/$phase.fixed" -nt "$md" ] && task="$task
+Fix round $(fail_rounds "$PDIR/phases/$phase.log") has landed since your last review: $PDIR/phases/$phase.fixed is the fix-role's account of what it changed. Check every item on your previous list as well as re-running your own checks. Your new summary replaces the old one: carry every defect id from its ## Defects block into yours, as VERIFIED if it is fixed or OPEN if it is not."
+    # brain reopen sent a work phase back: the reason is at the end of its own summary.
+    [ "$run_mode" = work ] && grep -q '^## Feedback from the human' "$md" 2>/dev/null && task="$task
+A human reopened this phase. Read the '## Feedback from the human' section at the end of $md first: it is why this phase is running again, and your new summary must say how you addressed each item."
+  fi
+
+  if [ "$role" = "human" ]; then
+    echo
+    echo "── Your turn: '$phase' ─────────────────────────────"
+    phase_section "$phase"
+    echo "Approve:  brain approve $phase"
+    if [ -n "$fix_role" ]; then echo "Changes:  brain reject $phase \"what to change\""
+    else echo "Send back: brain reopen <the phase that made it> \"what to change\""; fi
+    RUN_STATUS="gate"
+    notify "brain: $PROJECT is waiting for you at the '$phase' gate"
+    return 0
+  fi
+  local r_engine r_model r_effort
+  read -r r_engine r_model r_effort <<<"$(role_cfg "$role")"
+  [ -n "$engine" ] || engine="$r_engine"
+  [ -n "$model" ]  || model="$r_model"
+  [ -n "$effort" ] || effort="$r_effort"
+  # Host-only, write-once records live outside the memory mount. Record the prompt
+  # before launch, including failed invocations and engines with no transcript.
+  if [ "$run_mode" = review ]; then
+    task="$task
+This is a review handoff: write exactly one RESULT: PASS or RESULT: FAIL line in the summary, then append a matching YYYY-MM-DD PASS or YYYY-MM-DD FAIL line to $PDIR/phases/$phase.log. Create .done only on PASS. The host checks all three files, and the summary's ## Defects block (BRAIN.md, Review phases): FAIL needs an OPEN defect, PASS none, and every id the previous summary had OPEN must still be listed."
+  fi
+  local run_dir prompt
+  [ ! -f "$contract" ] || task="$task
+The host enforces $contract. Required evidence must be produced in this attempt. Verification commands run inside the sandbox after your handoff."
+  prompt="$(header)
+$task
+
+── What every phase of the '$PLAYBOOK' playbook is told ──
+$(playbook_preamble)
+
+── The '$phase' section of the playbook ──
+$(phase_section "$phase")"
+  run_dir="$(printf '%s\n' "$prompt" | BRAIN_LAUNCHER=$$ bash "$BRAIN/bin/run-record.sh" begin "$BRAIN" "$PDIR" "$PWD" "$PROJECT" "$PLAYBOOK" "$phase" "$role" "$engine" "$model" "$effort" "$run_mode" "$PHASE_TIMEOUT" "$MAX_FIX_LOOPS" "$TPL_VERSION" "$(mcp_names)")" \
+    || die "could not create pre-run record; agent not started"
+  if ! contract_inputs "$run_dir/contract" "$PWD" "$PDIR" > "$run_dir/preflight.log"; then
+    bash "$BRAIN/bin/run-record.sh" finish "$run_dir" "$PDIR" "$phase" blocked 0 \
+      || die "could not record blocked attempt at $run_dir"
+    cat "$run_dir/preflight.log"
+    info "'$phase' is blocked by missing contract inputs. Record: $run_dir"
+    return 2
+  fi
+  # Explicitly rerunning a completed phase must not leave the previous approval
+  # able to advance auto after an incomplete attempt. Preserve it in this record.
+  [ ! -f "$PDIR/phases/$phase.done" ] || mv "$PDIR/phases/$phase.done" "$run_dir/previous.done"
+  # Phase state is only ever marker files, and the cockpit is a separate container that
+  # cannot ask sbx what is running. So: one more marker, held for exactly as long as the
+  # blocking sbx run. The trap is the point — without it every Ctrl-C out of an agent
+  # session leaves the phase looking busy forever.
+  MARK="$PDIR/phases/$phase.running"
+  # The lease names the attempt that holds this phase; the attempt's record names the
+  # launcher. A launcher killed outright (kill -9, a crash, a lid closed for good) cannot
+  # remove it, so the next one finds a dead pid and closes the attempt (sweep_stale).
+  printf '%s\n' "${run_dir##*/}" > "$MARK"
+  # Globals, and a single-quoted trap, so the handler reads whatever the watcher pid is
+  # when it actually fires rather than what it was when the trap was installed.
+  STOPPER=""
+  # sbx run exits non-zero when the sandbox is stopped out from under it, so the auto-stop
+  # has to say it meant it. Written before the stop, because sbx run can return the moment
+  # the stop lands and would otherwise race this file into existence.
+  STOPPED="$(mktemp -u "${TMPDIR:-/tmp}/brain-autostop.XXXXXX")"
+  # Written by the watcher when it stopped the sandbox because the phase ran out of time
+  # rather than because it finished. Both stops look identical to `sbx run`, so without
+  # this the timeout would be indistinguishable from a clean phase.
+  TIMEDOUT="$(mktemp -u "${TMPDIR:-/tmp}/brain-timeout.XXXXXX")"
+  trap 'rm -f "$MARK" "$STOPPED" "$TIMEDOUT"; [ -n "$STOPPER" ] && kill "$STOPPER" 2>/dev/null; true' EXIT INT TERM
+
+  # Nobody should have to type /exit after every phase. The agent's last write is the
+  # signal: when it lands, stop the sandbox and the attached session ends on its own.
+  # This is also what makes `brain auto` unattended instead of pausing at every phase.
+  # BRAIN_AUTOSTOP=0 keeps the session open, for when you want to keep talking to it.
+  local sbname; sbname="$(sandbox_name "$engine")"
+  if [ "${BRAIN_AUTOSTOP:-1}" = 1 ]; then
+    ( waited=0
+      while sleep 3; do
+        waited=$((waited + 3))
+        if phase_finished "$phase" "$run_mode"; then
+          info "'$phase' is complete — closing $sbname"
+        elif [ "$PHASE_TIMEOUT" -gt 0 ] && [ "$waited" -ge "$PHASE_TIMEOUT" ]; then
+          # No handoff file after the whole budget: the agent is hung, or it died inside
+          # the sandbox without writing one. Stop it the same way, and leave the receipt —
+          # the transcript is the only place the reason for a hang is written down.
+          info "'$phase' wrote no handoff file in ${PHASE_TIMEOUT}s — closing $sbname"
+          : > "$TIMEDOUT"
+        else
+          continue
+        fi
+        write_runlog "$sbname" "$phase" "$role" "${run_dir##*/}"
+        : > "$STOPPED"
+        sbx stop "$sbname" >/dev/null 2>&1 \
+          || { rm -f "$STOPPED"; info "could not stop $sbname, type /exit to leave it"; }
+        break
+      done ) &
+    STOPPER=$!
+  fi
+
+  local rc=0
+  launch "$engine" "$model" "$effort" "$prompt" "$role" || rc=$?
+  [ -n "$STOPPER" ] && kill "$STOPPER" 2>/dev/null
+  # The watcher writes the receipt before it stops the sandbox; this covers the run it
+  # did not stop (BRAIN_AUTOSTOP=0, or a stop that failed), at the cost of a restart.
+  [ -f "$STOPPED" ] || write_runlog "$sbname" "$phase" "$role" "${run_dir##*/}"
+  # Tolerate the exit code only when we are the ones who pulled the sandbox out. Any
+  # other non-zero is a real failure (bad model, sandbox refused) and must still stop
+  # the run rather than be swallowed and committed as if the phase had gone fine.
+  # Stopping a sandbox is not instant, so an agent can still land its handoff file while
+  # the timeout is tearing it down. Recheck the whole handoff, or a phase that did finish gets reported as a timeout and
+  # the run stops for nothing. .running is still here — it is removed on the next line.
+  local timedout=0
+  local outcome=incomplete
+  if phase_finished "$phase" "$run_mode"; then outcome=handoff_valid; fi
+  if [ -f "$TIMEDOUT" ] && [ "$outcome" = incomplete ]; then timedout=1; outcome=timed_out; fi
+  if [ "$rc" -ne 0 ] && [ ! -f "$STOPPED" ]; then outcome=engine_error; fi
+  # Defects are checked on the host, now the agent has exited. A review that loses a
+  # previous finding, or fails with nothing open, is not a handoff (phase-contract.sh).
+  if [ "$outcome" = handoff_valid ] && [ "$run_mode" != work ]; then
+    if ! defects_verify "$phase" "$run_mode" "$md" "$run_dir/previous-summary.md" "$PDIR/phases/$phase.fixed" > "$run_dir/defects.log"; then
+      outcome=defects_invalid
+      cat "$run_dir/defects.log"
+    fi
+  fi
+  # Hide proposed completion while checks are running. A check failure, signal or
+  # crash must not leave a marker that advances the next invocation of auto.
+  local marker
+  if [ "$outcome" = handoff_valid ] && [ -f "$run_dir/contract" ]; then
+    for marker in done fixed; do
+      if [ "$PDIR/phases/$phase.$marker" -nt "$MARK" ]; then
+        mv "$PDIR/phases/$phase.$marker" "$run_dir/proposed.$marker" \
+          || die "could not hold proposed $marker for verification"
+      fi
+    done
+  fi
+  # A failing reviewer has completed its investigation, not proposed acceptance.
+  # Check work/PASS/fix handoffs; FAIL goes to its existing fixer without requiring
+  # the broken artifacts to pass the very checks the reviewer rejected.
+  if [ "$outcome" = handoff_valid ] && [ -f "$run_dir/contract" ]; then
+    if [ "$run_mode" != review ] || grep -Eq '^RESULT: PASS[[:space:]]*$' "$md"; then
+      if contract_verify "$run_dir/contract" "$PWD" "$PDIR" "$sbname" "$run_dir" "$MARK" > "$run_dir/verification.log"; then
+        outcome=verified
+      else
+        outcome=verification_failed
+        cat "$run_dir/verification.log"
+      fi
+      # exec may restart the sandbox that the watcher stopped for the handoff.
+      if [ -f "$STOPPED" ]; then sbx stop "$sbname" >/dev/null 2>&1 || true; fi
+    fi
+  fi
+  bash "$BRAIN/bin/run-record.sh" finish "$run_dir" "$PDIR" "$phase" "$outcome" "$rc" \
+    || die "could not record result at $run_dir"
+  for marker in done fixed; do
+    [ -f "$run_dir/proposed.$marker" ] || continue
+    if [ "$outcome" = verified ] || [ "$outcome" = handoff_valid ]; then
+      cp "$run_dir/proposed.$marker" "$PDIR/phases/$phase.$marker" || die "could not publish verified $marker"
+    else
+      mv "$run_dir/proposed.$marker" "$run_dir/rejected.$marker" || die "could not retain rejected $marker"
+    fi
+  done
+  if [ "$outcome" != handoff_valid ] && [ "$outcome" != verified ]; then
+    [ ! -f "$PDIR/phases/$phase.done" ] || mv "$PDIR/phases/$phase.done" "$run_dir/rejected.done"
+    if [ "$PDIR/phases/$phase.fixed" -nt "$MARK" ]; then mv "$PDIR/phases/$phase.fixed" "$run_dir/rejected.fixed"; fi
+  fi
+  # A review the host rejected for its defects must not count as a round: left in place,
+  # its FAIL would send the fixer in on a list the host just refused. Put the summary and
+  # log back as this attempt found them (mtimes kept, so fix_pending reads them the same
+  # way); the agent's version is in the record as summary.md and rejected.md.
+  if [ "$outcome" = defects_invalid ] && [ "$run_mode" = review ]; then
+    mv "$md" "$run_dir/rejected.md"
+    [ ! -f "$run_dir/previous-summary.md" ] || cp -p "$run_dir/previous-summary.md" "$md"
+    if [ -f "$run_dir/previous.log" ]; then cp -p "$run_dir/previous.log" "$PDIR/phases/$phase.log"; else rm -f "$PDIR/phases/$phase.log"; fi
+  fi
+  rm -f "$MARK" "$STOPPED" "$TIMEDOUT"; trap - EXIT INT TERM
+  # Commit either way: a phase that ran out of time still changed memory, and throwing
+  # that away would lose the only record of how far it got.
+  commit_memory "$PROJECT $phase"
+  [ "$outcome" != engine_error ] || die "$engine exited with status $rc (record: $run_dir)"
+  if [ "$timedout" = 1 ]; then
+    RUN_STATUS="timeout"
+    info "'$phase' timed out. Read $md and the host record at $run_dir,"
+    info "then re-run it (brain run $phase), raise the budget (BRAIN_PHASE_TIMEOUT=14400),"
+    info "or take it by hand (brain open)."
+    return 3
+  fi
+  if [ "$outcome" = incomplete ] || [ "$outcome" = verification_failed ] || [ "$outcome" = defects_invalid ]; then
+    info "'$phase' did not satisfy its $run_mode handoff contract. Record: $run_dir"
+    notify "brain: $PROJECT stopped — '$phase' has an incomplete handoff"
+    return 2
+  fi
+}
+
+# Run phases until the playbook finishes or something needs you. Four ways out, and they
+# are four different exit codes on purpose: unattended, the code is the only thing a
+# wrapper (cron, launchd, a script of yours) has to tell "finished" from "gave up".
+#
+#   0  playbook complete
+#   1  error — see the message (every die notifies too)
+#   2  a phase came back not marked done; look at it
+#   3  a ceiling stopped the run: a phase timed out, or MAX_RUNS was reached
+#
+# A human gate is not an exit. It waits, because a gate is the one stop where the answer
+# is known to be coming — so an overnight run parks at your design gate instead of
+# unwinding, and carries on the moment you approve from the cockpit or the terminal.
+cmd_auto() {
+  load_project
+  local before after rc runs=0
+  while :; do
+    before="$(next_phase)"
+    if [ -z "$before" ]; then
+      info "playbook complete — learn from this run: brain playbook analyse $PLAYBOOK"
+      notify "brain: $PROJECT finished the $PLAYBOOK playbook"
+      return 0
+    fi
+    if [ "$MAX_RUNS" -gt 0 ] && [ "$runs" -ge "$MAX_RUNS" ]; then
+      info "stopped after $runs agent runs (BRAIN_MAX_RUNS) — still on '$before'."
+      info "That is a loop that is not converging, not a long playbook: read $PDIR/phases/$before.md."
+      notify "brain: $PROJECT hit the $MAX_RUNS-run ceiling on '$before'"
+      return 3
+    fi
+
+    rc=0; cmd_run || rc=$?
+    # 1 is cmd_run's "no phase left", which the top of this loop reports properly.
+    [ "$rc" -eq 1 ] && continue
+    [ "$rc" -eq 2 ] && return 2
+    [ "$rc" -eq 3 ] && { notify "brain: $PROJECT timed out on '$before'"; return 3; }
+
+    if [ "$RUN_STATUS" = "gate" ]; then
+      info "waiting for your verdict on '$before' — approve it here, or in the cockpit. Ctrl-C stops the run."
+      # Waiting, it holds no phase lease, so brain watch could not see it and opened a
+      # second `brain auto` for the cockpit's "then start": two launchers raced into the
+      # next phase and ran it twice in one sandbox. The pid says this one is still here
+      # and carries on by itself; a Ctrl-C leaves it naming a dead process, which counts
+      # as gone.
+      echo $$ > "$PDIR/.waiting"
+      # Poll, because the verdict can arrive from anywhere: this terminal, another one,
+      # or the cockpit writing the marker straight into memory. Either verdict ends the
+      # wait — approve writes .done, reject makes the fix-role the next thing to run.
+      while :; do
+        sleep 5
+        if [ -f "$PDIR/phases/$before.done" ]; then info "'$before' approved"; break; fi
+        if fix_pending "$before"; then info "'$before' sent back — fixing"; break; fi
+      done
+      rm -f "$PDIR/.waiting"
+      continue
+    fi
+    runs=$((runs + 1))
+
+    after="$(next_phase)"
+    if [ "$before" = "$after" ] && ! verdict_is FAIL "$PDIR/phases/$before.md"; then
+      info "phase '$before' not marked done — stopping so you can check. Continue with: brain run"
+      notify "brain: $PROJECT stopped — '$before' came back not done"
+      return 2
+    fi
+  done
+}
+
+cmd_open() {
+  load_project
+  local engine="claude" model="default" effort=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --engine) engine="$2"; shift 2 ;;
+      --model)  model="$2";  shift 2 ;;
+      --effort) effort="$2"; shift 2 ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
+  launch "$engine" "$model" "$effort" "$(header)
+Load the project memory (brief, decisions, phase summaries), give me a 5-line status, then wait for my instructions."
+  commit_memory "$PROJECT session"
+}
+
+# Between phases the sandbox is stopped, so the site and its database are down even
+# though the data is still there. This brings both back without running an agent:
+# `sbx ports --publish` starts a stopped sandbox, and DEV_UP is the project's own
+# start command, written by scaffold because that is the phase that worked it out.
+cmd_up() {
+  load_project
+  local engine="${1:-claude}" sb
+  sb="$(sandbox_name "$engine")"
+  sandbox_exists "$sb" || die "no sandbox $sb yet — run a phase first, or: brain run"
+  [ -n "${PORTS:-}" ] || die "project.env has no PORTS line, so nothing is reachable from the host. Add e.g. PORTS=3000:3000,27018:27018 (scaffold normally writes it)"
+  publish_ports "$sb"
+  if [ -n "${DEV_UP:-}" ]; then
+    info "starting the dev stack in $sb"
+    sbx exec "$sb" -- sh -lc "cd '$PROJECT_DIR' && $DEV_UP" || die "DEV_UP failed — run it yourself with: sbx exec $sb -- sh -lc \"cd '$PROJECT_DIR' && $DEV_UP\""
+  else
+    info "no DEV_UP in project.env — ports are published, start the stack yourself with: sbx exec $sb -- sh -lc '...'"
+  fi
+  sbx ports "$sb"
+}
+
+# The other half of `brain up`: stopping the sandbox stops the dev stack and unpublishes
+# the ports in one move, and the volume keeps the data for the next `brain up`.
+cmd_down() {
+  load_project
+  local sb; sb="$(sandbox_name "${1:-claude}")"
+  sandbox_exists "$sb" || die "no sandbox $sb"
+  sbx stop "$sb" >/dev/null || die "could not stop $sb"
+  info "$sb stopped — 'brain up' brings it back with its data"
+}
+
+cmd_approve() {
+  load_project
+  local phase="" defer=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --defer) [ -n "${2:-}" ] || die "--defer takes a defect id"; defer="$defer $2"; shift 2 ;;
+      -*) die "unknown option $1" ;;
+      *) phase="$1"; shift ;;
+    esac
+  done
+  [ -n "$phase" ] || phase="$(next_phase)"
+  [ -n "$(phase_field "$phase" 2)" ] || die "phase '$phase' not in playbook '$PLAYBOOK'"
+  [ -z "$(live_leases "$PROJECT" "$PDIR")" ] || die "a phase of $PROJECT is running — approve it once the agent stops"
+  local p="$PDIR/phases/$phase" since=0 id kind body
+  local -a lines=()
+  for id in $defer; do
+    defects_ids "$p.md" OPEN | grep -qxF "$id" || die "'$id' is not an OPEN defect of '$phase'"
+  done
+  # Approving after a fix round is approving the fixed work: what the fix names is verified.
+  [ -f "$p.fixed" ] && [ "$p.fixed" -nt "$p.md" ] && since=1
+  body="$(approve_summary "$p.md" "$p.fixed" "$(date +%F)" "$since" "$defer")"
+  # What approval did to each open defect, for the record: read off the summary it wrote.
+  while read -r id; do
+    kind="$(printf '%s\n' "$body" | awk -v id="$id" '/^## /{ on = ($0 ~ /^## Defects/) } on && $2 == id { print tolower($3); exit }')"
+    lines+=("$kind $id")
+  done < <(defects_ids "$p.md" OPEN)
+  printf '%s\n' "$body" > "$p.md"
+  echo "$(date +%F) PASS" >> "$p.log"
+  touch "$p.done"
+  printf '%s\n' ${lines[@]+"${lines[@]}"} | bash "$BRAIN/bin/run-record.sh" human "$BRAIN" "$PDIR" "$PROJECT" "$PLAYBOOK" "$phase" approved >/dev/null \
+    || info "could not write the host record for this approval"
+  commit_memory "$PROJECT $phase approved"
+  [ ${#lines[@]} -eq 0 ] || info "open defects closed by this approval: ${lines[*]}"
+  info "'$phase' approved. Next: brain run"
+}
+
+cmd_reject() {
+  load_project
+  local phase="${1:-}"; shift || true
+  [ -n "$phase" ] && [ $# -gt 0 ] || die "usage: brain reject <phase> \"feedback\" [\"more feedback\"]"
+  [ -n "$(phase_field "$phase" 3)" ] || die "phase '$phase' has no fix role in the playbook. Send the work back to the phase that made it instead: brain reopen <phase> \"feedback\""
+  [ -z "$(live_leases "$PROJECT" "$PDIR")" ] || die "a phase of $PROJECT is running — reject it once the agent stops"
+  send_back "$phase" rejected "$@"
+  info "feedback saved. 'brain run' now sends it to the '$(phase_field "$phase" 3)' role"
+}
+
+# The route back from a gate that has no fix-role — launch-gate — and from any phase you
+# want redone after the playbook moved past it. The phase and everything after it lose
+# their .done (kept in the record), so next_phase lands on it and the rest runs again.
+cmd_reopen() {
+  load_project
+  local phase="${1:-}"; shift || true
+  [ -n "$phase" ] && [ $# -gt 0 ] || die "usage: brain reopen <phase> \"why\" [\"more\"] — sends the playbook back to <phase>"
+  [ -n "$(phase_field "$phase" 2)" ] || die "phase '$phase' not in playbook '$PLAYBOOK'"
+  [ -z "$(live_leases "$PROJECT" "$PDIR")" ] || die "a phase of $PROJECT is running — reopen once the agent stops"
+  send_back "$phase" reopened "$@"
+  info "'$phase' reopened; it and every phase after it run again. Next: brain run"
+}
+
+# One implementation of "a human sends work back", for reject and reopen. A phase with a
+# fix-role gets the rejection its fixer reads; a work phase keeps its summary — the next
+# role's handoff — and gets the feedback appended, which its rerun is told to read first.
+send_back() { # phase rejected|reopened item...
+  local phase="$1" outcome="$2" p="$PDIR/phases/$1" item later=0 x rec
+  shift 2
+  local -a lines=() moved=()
+  if [ -n "$(phase_field "$phase" 3)" ]; then
+    reject_summary "$phase" "$(( $(fail_rounds "$p.log") + 1 ))" "$(date +%F)" "$@" > "$p.md"
+    echo "$(date +%F) FAIL" >> "$p.log"
+    # .fixed must go too: fix_pending compares its mtime against .md, so a stale marker
+    # would make brain run skip the fix round.
+    rm -f "$p.fixed"
+  else
+    { [ ! -s "$p.md" ] || { cat "$p.md"; echo; }
+      echo "## Feedback from the human ($(date +%F))"
+      local i=0; for item in "$@"; do i=$((i + 1)); echo "$i. $item"; done
+    } > "$p.md.tmp" && mv "$p.md.tmp" "$p.md"
+  fi
+  for item in "$@"; do lines+=("item $item"); done
+  # This phase and every later one, in playbook order.
+  while read -r x _; do
+    [ "$x" = "$phase" ] && later=1
+    [ "$later" = 1 ] && [ -f "$PDIR/phases/$x.done" ] && moved+=("$x") && lines+=("reopened $x")
+  done < <(phase_lines)
+  rec="$(printf '%s\n' "${lines[@]}" | bash "$BRAIN/bin/run-record.sh" human "$BRAIN" "$PDIR" "$PROJECT" "$PLAYBOOK" "$phase" "$outcome")" \
+    || die "could not write the host record; nothing was sent back"
+  for x in ${moved[@]+"${moved[@]}"}; do mv "$PDIR/phases/$x.done" "$rec/$x.done"; done
+  commit_memory "$PROJECT $phase $outcome"
+}
+
+# Start the run the cockpit asked for.
+#
+# The cockpit is a container. It can write into memory/ and that is all — it cannot reach
+# your terminal, and a web server on your Mac that can run host commands is a worse trade
+# than typing eight characters. So the split stays what it has always been, with one thin
+# bridge: the cockpit writes what it wants run, this runs it, as you, and only while you
+# leave it open. The request is one word — `run` or `auto` — and it is checked against the
+# two that exist, because it comes from a web server and names a command.
+# The cockpit's staged projects. It cannot run `brain new` (no brain, no sbx, and ~/dev is
+# mounted read-only in its container), so it writes memory/.new/<slug>/request — one line,
+# `<playbook> <slug> [client]` — plus the brief it filled in, and this makes the project
+# exactly as `brain new` would from the terminal. A failure stays in the folder as
+# `error`, which the cockpit shows, instead of being retried every two seconds.
+watch_new() {
+  local st pb slug client then
+  for st in "$MEM"/.new/*/; do
+    [ -f "$st/request" ] || continue
+    [ -f "$st/error" ] && continue
+    slug="$(basename "$st")"
+    read -r pb slug client _ < "$st/request" || true
+    if ! [[ "$pb" =~ ^[a-z0-9][a-z0-9-]*$ && "$slug" =~ ^[a-z0-9][a-z0-9-]*$ && "${client:-x}" =~ ^[a-z0-9][a-z0-9-]*$ ]] \
+      || [ "$slug" != "$(basename "$st")" ] || { ! kind_app "$pb" >/dev/null && [ ! -d "$(playbook_dir "$pb")" ]; }; then
+      echo "not a valid request: $(head -1 "$st/request")" > "$st/error"; continue
+    fi
+    # A kind an app owns (an academy workspace): that app makes it, from what the form staged.
+    local app
+    if app="$(kind_app "$pb")"; then
+      if app_cli "$app" && declare -F "${app}_studio_new" >/dev/null; then
+        if "${app}_studio_new" "$slug" "$st"; then rm -rf "$st"
+        else tail -3 "$st/log" > "$st/error" 2>/dev/null; [ -s "$st/error" ] || echo "the $app app could not create $slug" > "$st/error"; info "could not create $slug: $(tail -1 "$st/error")"; fi
+      else echo "the $app app cannot create a $pb from the Studio" > "$st/error"; fi
+      continue
+    fi
+    info "creating project $slug from $pb"
+    if (cd "$BRAIN" && BRAIN_NONINTERACTIVE=1 cmd_new "$pb" "$slug" ${client:+--client "$client"}) > "$st/log" 2>&1; then
+      [ -f "$st/brief.md" ] && mv "$st/brief.md" "$MEM/projects/$slug/brief.md"
+      # Files the form uploaded before the project existed; the brief already names them.
+      if [ -d "$st/sources" ]; then
+        mkdir -p "$MEM/projects/$slug/sources"
+        find "$st/sources" -mindepth 1 -maxdepth 1 -type f -exec mv {} "$MEM/projects/$slug/sources/" \;
+      fi
+      then=""; [ -f "$st/then" ] && then="$(tr -dc 'a-z' < "$st/then" | head -c 8)"
+      rm -rf "$st"
+      [ -n "$then" ] && echo "$then" > "$MEM/projects/$slug/.run-request"
+    else
+      tail -3 "$st/log" > "$st/error"; info "could not create $slug: $(tail -1 "$st/error")"
+    fi
+  done
+}
+
+# Projects with a phase in a sandbox, for the run cap. A window this loop just opened has
+# no .running lease until its sandbox is up, so the launch itself leaves a .launching
+# marker that counts for 90 seconds or until the lease appears, whichever is first.
+running_projects() {
+  local dir n=0
+  for dir in "$MEM"/projects/*/; do
+    if compgen -G "$dir/phases/*.running" >/dev/null || compgen -G "$dir/.*-running" >/dev/null; then rm -f "$dir/.launching"; n=$((n + 1))
+    elif [ -f "$dir/.launching" ] && [ -z "$(find "$dir/.launching" -mmin +1 2>/dev/null)" ]; then n=$((n + 1))
+    else rm -f "$dir/.launching"; fi
+  done
+  echo "$n"
+}
+
+# One tick of the cockpit's run requests: start what fits under the cap, leave the rest
+# in place. QUEUED says how many waited, for the one line the loop prints about it.
+QUEUED=0
+watch_runs() {
+  local req dir name want pdir
+  QUEUED=0
+  for req in "$MEM"/projects/*/.run-request; do
+    [ -f "$req" ] || continue
+    dir="$(dirname "$req")"; name="$(basename "$dir")"
+    want="$(tr -dc 'a-z' < "$req" | head -c 8)"
+    case "$want" in
+      run|auto) ;;
+      *) rm -f "$req"; info "$name asked for '$want', which is not a command — ignored"; continue ;;
+    esac
+    pdir="$(awk -F= '$1 == "PROJECT_DIR" { print $2 }' "$dir/project.env" 2>/dev/null | tr -d '"')"
+    [ -n "$pdir" ] && [ -d "$pdir" ] || { rm -f "$req"; info "$name has no readable PROJECT_DIR — skipped"; continue; }
+    # A phase already in a sandbox: a second run would fight the first over the same
+    # sandbox and the same marker files.
+    if compgen -G "$dir/phases/*.running" >/dev/null; then
+      rm -f "$req"; info "$name already has a phase running — not starting another"
+      continue
+    fi
+    # Nor one whose `brain auto` is waiting at a human gate: it carries on by itself once
+    # the verdict lands, which is what the cockpit's "then start" asked for.
+    if [ -f "$dir/.waiting" ] && kill -0 "$(cat "$dir/.waiting" 2>/dev/null)" 2>/dev/null; then
+      rm -f "$req"; info "$name is already waiting at its gate and carries on by itself"
+      continue
+    fi
+    # At the cap the request stays where it is and is picked up when a window closes.
+    # ponytail: between two phases of one `brain auto` there is no lease for a few
+    # seconds, so the cap is soft by one; a per-project auto lease would make it exact.
+    if [ "$MAX_PARALLEL" -gt 0 ] && [ "$(running_projects)" -ge "$MAX_PARALLEL" ]; then
+      QUEUED=$((QUEUED + 1)); continue
+    fi
+    rm -f "$req"; : > "$dir/.launching"
+    info "$name -> brain $want   ($pdir)"
+    terminal "$pdir" "brain $want"
+  done
+}
+
+# `brain watch install` makes it a login item, which is what lets someone who never opens
+# a terminal press Run in the cockpit. The plist carries this brain's path and today's
+# PATH, since launchd starts with neither.
+# One login item per brain: the label carries the brain's folder name, so installing this
+# one never replaces the watcher of another brain on the same Mac.
+watch_label() { echo "com.agent-brain.watch.$(basename "$BRAIN" | tr -c 'A-Za-z0-9.\n-' '-')"; }
+
+watch_install() {
+  local label; label="$(watch_label)"
+  local plist="$HOME/Library/LaunchAgents/$label.plist"
+  mkdir -p "$HOME/Library/LaunchAgents" "$BRAIN/.runs"
+  cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key><array><string>$BRAIN/bin/brain</string><string>watch</string></array>
+  <key>EnvironmentVariables</key><dict>
+    <key>BRAIN</key><string>$BRAIN</string>
+    <key>DEV_DIR</key><string>$DEV</string>
+    <key>HOME</key><string>$HOME</string>
+    <key>PATH</key><string>$PATH</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$BRAIN/.runs/watch.log</string>
+  <key>StandardErrorPath</key><string>$BRAIN/.runs/watch.log</string>
+</dict></plist>
+EOF
+  launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$(id -u)" "$plist" || die "launchctl could not load $plist"
+  info "brain watch now starts at login and restarts if it dies — log: $BRAIN/.runs/watch.log"
+  info "the first run it starts may ask you to allow it to control Terminal; say yes once"
+}
+
+watch_uninstall() {
+  local label; label="$(watch_label)"
+  local plist="$HOME/Library/LaunchAgents/$label.plist"
+  launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+  rm -f "$plist"
+  info "removed the login item; brain watch now runs only when you start it"
+}
+
+# A secret from the Studio's page for an app: the cockpit checked it where the app said to
+# and left the token (already "login:password" in base64 for basic) in a 0600 gitignored
+# request file. It goes into sbx's secret store, the file is gone before anything else
+# happens, and the server is registered with the header that uses it. A secret reaches a
+# sandbox only this way, as an MCP server's key: the agent never sees it. Prints one line.
+secret_connect() { # name
+  local name="$1" req="$MEM/.secret-$1.request" token kind url s
+  token="$(tr -dc 'A-Za-z0-9+/=._~-' < "$req" | head -c 4000)"; rm -f "$req"
+  [ -n "$token" ] || { echo "error: the request held no key"; return 1; }
+  kind="$(app_lines secret | awk -v n="$name" '$2 == n { print $3; exit }')"
+  url="$(app_lines mcp | awk -v n="$name" '$2 == n { print $3; exit }')"
+  [ -n "$kind" ] && [ -n "$url" ] || { echo "error: no installed app has a secret and an MCP server called $name"; return 1; }
+  printf '%s' "$token" | sbx secret set "mcp:$name:token" >/dev/null 2>&1 \
+    || { echo "error: sbx could not store the key"; return 1; }
+  # shellcheck disable=SC2016  # ${token} is sbx's placeholder, filled from the secret store
+  sbx mcp inspect "$name" >/dev/null 2>&1 \
+    || sbx mcp add "$name" --url "$url" --header "Authorization: $([ "$kind" = basic ] && echo Basic || echo Bearer) "'${token}' >/dev/null 2>&1 \
+    || { echo "error: sbx could not register the $name server"; return 1; }
+  # Sandboxes take their MCP set at create time; load it into the ones that already exist.
+  # ponytail: a sandbox that already had the server keeps the old key until it restarts.
+  for s in $(sbx ls 2>/dev/null | awk 'NR > 1 { print $1 }'); do
+    sbx mcp load "$name" --sandbox "$s" >/dev/null 2>&1 || true
+  done
+  echo "connected $(date +%F)"
+}
+
+cmd_watch() {
+  case "${1:-}" in
+    install) watch_install; return 0 ;;
+    uninstall) watch_uninstall; return 0 ;;
+    '') ;;
+    *) die "usage: brain watch [install|uninstall]" ;;
+  esac
+  local beat="$MEM/.watch" req dir name want pdir queued f
+  [ -d "$MEM/projects" ] || die "no memory/projects under $BRAIN"
+  # The heartbeat IS the answer to "is anyone listening": fresh means yes, gone means no.
+  # Without it, approving with no watcher running looks like a broken button.
+  trap 'rm -f "$MEM/.watch"; echo; info "watch stopped — the cockpit goes back to showing you the command"; exit 0' EXIT INT TERM
+  info "watching $MEM for cockpit verdicts (ctrl-c to stop), up to $MAX_PARALLEL runs at once"
+  # Only one watcher per brain, so a marker left now is from one that died mid-request.
+  rm -f "$MEM/.apps-running"; [ -f "$MEM/.apps-request" ] || echo catalog > "$MEM/.apps-request"
+  while :; do
+    : > "$beat"
+    # A lease left by a dead launcher would block its project here forever.
+    for dir in "$MEM"/projects/*/; do
+      compgen -G "$dir/phases/*.running" >/dev/null && sweep_stale "$(basename "$dir")" "${dir%/}"
+    done
+    watch_new
+    watch_runs
+    watch_apps
+    [ "$QUEUED" = 0 ] || [ -n "${QUEUE_SAID:-}" ] || { info "queue: $QUEUED waiting for a free slot ($MAX_PARALLEL at once)"; QUEUE_SAID=1; }
+    [ "$QUEUED" = 0 ] && QUEUE_SAID=""
+    # The author, from the cockpit's Draft button: one at a time, in its own window. At
+    # the cap the request waits like a run does.
+    if [ -f "$MEM/.draft-request" ]; then
+      name="$(tr -dc 'a-z0-9-' < "$MEM/.draft-request" | head -c 40)"
+      if ! [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || [ ! -s "$BRAIN/.drafts/playbook/$name/REQUEST.md" ]; then
+        rm -f "$MEM/.draft-request"; info "the cockpit asked to draft '$name', which has no request — ignored"
+      elif sbx ls 2>/dev/null | awk 'NR > 1 { print $1 }' | grep -q '^playbook-draft-'; then
+        :  # one author at a time; the request waits
+      else
+        rm -f "$MEM/.draft-request"
+        info "brain -> playbook draft $name   ($BRAIN)"
+        terminal "$BRAIN" "brain playbook draft $name"
+      fi
+    fi
+    # The cockpit installed something into system/ and wants it on the record. The
+    # container has no git; this is the only writer of commits for it.
+    if [ -f "$MEM/.commit-request" ]; then
+      want="$(head -c 200 "$MEM/.commit-request" | tr -cd ' -~')"; rm -f "$MEM/.commit-request"
+      if git -C "$BRAIN" add system >/dev/null 2>&1 && git -C "$BRAIN" commit -qm "${want:-cockpit: install}" >/dev/null 2>&1
+      then info "committed: ${want:-cockpit: install}"
+      else info "nothing to commit for '${want}'"; fi
+      commit_memory "${want:-cockpit: install}"
+    fi
+    # The cockpit's brain-level buttons, not a project's: `evolve`, or `evolve <name>` /
+    # `analyse <name>` for one playbook. One at a time: their sandboxes exist exactly
+    # while one runs, since both commands drop theirs at the end.
+    if [ -f "$MEM/.evolve-request" ]; then
+      want="$(head -c 80 "$MEM/.evolve-request" | tr -d '\n')"; rm -f "$MEM/.evolve-request"
+      case "$want" in
+        evolve) want="brain evolve" ;;
+        "evolve "*|"analyse "*)
+          name="${want#* }"
+          if [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] && [ -d "$(playbook_dir "$name")" ]; then want="brain playbook ${want%% *} $name"
+          else info "the cockpit asked to ${want%% *} playbook '$name', which does not exist — ignored"; want=""; fi ;;
+        *) info "the cockpit asked for '$want', which is not a command — ignored"; want="" ;;
+      esac
+      if [ -z "$want" ]; then :
+      elif sbx ls 2>/dev/null | awk 'NR > 1 { print $1 }' | grep -qE '^(brain-self|playbook-analysis)-'; then
+        info "an evolve or playbook analysis sandbox exists — one is running, or one died (sbx rm it). Not starting another"
+      else
+        info "brain -> $want   ($BRAIN)"
+        terminal "$BRAIN" "$want"
+      fi
+    fi
+    # The Studio's Apps page, in the background: a clone can take a while.
+    if [ -f "$MEM/.apps-request" ] && [ ! -f "$MEM/.apps-running" ]; then
+      mv "$MEM/.apps-request" "$MEM/.apps-running"
+      info "apps: $(head -c 80 "$MEM/.apps-running")"
+      apps_request >/dev/null 2>&1 &
+    fi
+    # An app's secret from the Studio, on its way into sbx's secret store.
+    for f in "$MEM"/.secret-*.request; do
+      [ -f "$f" ] || continue; name="${f##*/.secret-}"; name="${name%.request}"
+      if [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then secret_connect "$name" > "$MEM/.secret-$name.status" 2>&1 || true
+        info "secret $name: $(cat "$MEM/.secret-$name.status")"
+      else rm -f "$f"; fi
+    done
+    sleep 2
+  done
+}
+
+terminal() { # dir command -> a new Terminal window running it there, closed when it succeeds
+  # AppleScript is the only way to hand a command to a new terminal window on macOS.
+  # `quoted form of` keeps a path with a space or a quote in it one argument instead
+  # of more script.
+  # `&& exit` ends the shell only when the command succeeded, and the watch below then
+  # closes the window. A failure leaves it open, so the reason is still there to read.
+  # Terminal's own "close when the shell exits" is not relied on: macOS ships it off.
+  local wid
+  wid="$(osascript 2>/dev/null <<OSA
+tell application "Terminal"
+  set t to do script "cd " & quoted form of "$1" & " && $2 && exit"
+  activate
+  return id of front window
+end tell
+OSA
+)" || { info "could not open Terminal — run it yourself: cd $1 && $2"; return 0; }
+  # In the background, so the watcher keeps watching. A window you close first ends this
+  # too: its id no longer resolves and the script stops on the error.
+  [ -n "$wid" ] || return 0
+  osascript >/dev/null 2>&1 <<OSA &
+tell application "Terminal"
+  repeat while (count of processes of tab 1 of window id $wid) > 0
+    delay 3
+  end repeat
+  close window id $wid
+end tell
+OSA
+}
+
+# ---------- brain app: install, remove, check --------------------------------
+# An app is a folder in a git repo, by default one of the folders of APPS_SOURCE (brain.conf;
+# pshiuu/agent-brain-apps). Install copies that folder to system/apps/<name>/, which the
+# brain's own git ignores, after app_check has passed on the copy, and records where it came
+# from in system/apps.lock (this brain's, which git ignores): name, source, commit, path. Copied, not cloned, so what is
+# installed is exactly what was checked; `git diff system/apps.lock`-style history lives in
+# the source repo. The format itself is system/skills/app-format/SKILL.md.
+
+app_check() { # dir [name] -> "err|note <problem>" lines; non-zero when any err
+  local d="$1" name="${2:-$(basename "$1")}" bad=0 want n r role pb out
+  [ -f "$d/app.conf" ] || { echo "err  no app.conf"; return 1; }
+  [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "err  '$name' is not a usable app name: lowercase letters, digits and dashes"; bad=1; }
+  [ "$(app_field "$d" name)" = "$name" ] || { echo "err  app.conf says name '$(app_field "$d" name)', the app is '$name'"; bad=1; }
+  [ -n "$(app_field "$d" version)" ] || { echo "err  app.conf has no version line"; bad=1; }
+  want="$(app_field "$d" brain)"; n="${want//[!0-9]/}"
+  case "$want" in
+    '>='*) [ -n "$n" ] && [ "$n" -le "$BRAIN_VERSION" ] || { echo "err  needs brain $want, this base is $BRAIN_VERSION"; bad=1; } ;;
+    *) echo "err  app.conf needs a 'brain >= N' line (this base is $BRAIN_VERSION)"; bad=1 ;;
+  esac
+  for r in $(app_field "$d" requires); do
+    [ -f "$SYS/apps/$r/app.conf" ] || { echo "err  requires the app '$r', which is not installed"; bad=1; }
+  done
+  # Both halves of every role, inside the app: a line here with its instructions there
+  # would work today and break the day the other app is removed.
+  if [ -f "$d/roles.conf" ]; then
+    while read -r role; do
+      [ -f "$d/roles/$role.md" ] || { echo "err  role '$role' has a line in roles.conf but no roles/$role.md"; bad=1; }
+    done < <(awk '$1 !~ /^#/ && NF >= 3 { print $1 }' "$d/roles.conf")
+  fi
+  for r in "$d"/roles/*.md; do
+    [ -f "$r" ] || continue; role="$(basename "$r" .md)"
+    awk -v r="$role" '$1 !~ /^#/ && $1 == r && NF >= 3 { f = 1 } END { exit !f }' "$d/roles.conf" 2>/dev/null \
+      || { echo "err  roles/$role.md has no line in the app's roles.conf"; bad=1; }
+  done
+  for r in "$d"/skills/*/; do
+    [ -d "$r" ] || continue
+    [ -f "$r/SKILL.md" ] || { echo "err  skill '$(basename "$r")' has no SKILL.md"; bad=1; }
+  done
+  if [ -f "$d/ui/app.json" ]; then
+    for r in $(grep -o '"view"[[:space:]]*:[[:space:]]*"[^"]*"' "$d/ui/app.json" | sed 's/.*"\([^"]*\)"$/\1/'); do
+      case " $APP_VIEWS " in *" $r "*) ;; *) echo "err  ui/app.json: view '$r' is not one of: $APP_VIEWS"; bad=1 ;; esac
+    done
+  fi
+  # cli.sh is sourced into the launcher, so a function it defines under another name would
+  # silently replace one of the launcher's own.
+  if [ -f "$d/cli.sh" ]; then
+    bash -n "$d/cli.sh" 2>/dev/null || { echo "err  cli.sh does not parse (bash -n cli.sh)"; bad=1; }
+    for r in $(sed -nE 's/^[[:space:]]*(function[[:space:]]+)?([A-Za-z_][A-Za-z0-9_-]*)[[:space:]]*\(\).*/\2/p' "$d/cli.sh"); do
+      case "$r" in "cmd_$name"|"${name}_"*) ;; *) echo "err  cli.sh defines $r(): an app's functions are cmd_$name and ${name}_*, so none replaces the launcher's"; bad=1 ;; esac
+    done
+    grep -qE "^[[:space:]]*(function[[:space:]]+)?cmd_$name[[:space:]]*\(\)" "$d/cli.sh" || { echo "err  cli.sh defines no cmd_$name, which \`brain $name\` calls"; bad=1; }
+  fi
+  # A kind is what a project.env's KIND names and what the Studio's New form asks for in
+  # place of a playbook, so it belongs to one app and is no playbook's name.
+  r="$(app_field "$d" kind)"
+  if [ -n "$r" ]; then
+    [ -f "$d/cli.sh" ] || { echo "err  app.conf owns kind '$r', but there is no cli.sh to run it"; bad=1; }
+    n="$(kind_app "$r" || true)"; [ -z "$n" ] || [ "$n" = "$name" ] || [ "$n" = "${SKIP_APP:-}" ] || { echo "err  kind '$r' is already owned by the app '$n'"; bad=1; }
+    { [ -d "$(playbook_dir "$r")" ] || [ -d "$d/playbooks/$r" ]; } && { echo "err  kind '$r' is also a playbook's name"; bad=1; }
+  fi
+  # What its sandboxes may reach and use. A server name is global in sbx, so it is one app's.
+  out="$(awk '
+    $1 == "mcp" { m[$2] = 1
+      if ($2 !~ /^[a-z0-9][a-z0-9-]*$/ || $3 !~ /^https:\/\// || NF != 3) print "err  app.conf: mcp <name> <https-url>, got: " $0 }
+    $1 == "secret" { s[$2] = 1
+      if ($3 != "basic" && $3 != "bearer" || $4 != "-" && $4 !~ /^https:\/\// || NF < 5) print "err  app.conf: secret <name> basic|bearer <check-url|-> <label>, got: " $0 }
+    $1 == "setting" {
+      if ($2 !~ /^[a-z0-9_-]+$/ || NF < 5) print "err  app.conf: setting <key> toggle|choice|text <default> <label>, got: " $0
+      else if ($3 == "toggle" && $4 != "on" && $4 != "off") print "err  app.conf: setting " $2 ": a toggle is on or off, not " $4
+      else if ($3 != "toggle" && $3 != "choice" && $3 != "text") print "err  app.conf: setting " $2 ": type " $3 " is not toggle, choice or text" }
+    $1 == "allow" && NF < 2 { print "err  app.conf: allow <host>[,<host>...] names no host" }
+    END { for (n in s) if (!(n in m)) print "err  app.conf: secret " n " has no mcp line: a secret reaches a sandbox only as that MCP server'"'"'s key" }
+  ' "$d/app.conf")"
+  [ -n "$out" ] && { echo "$out"; bad=1; }
+  for r in $(awk '$1 == "mcp" { print $2 }' "$d/app.conf"); do
+    conf_lines mcp | awk -v n="$r" '$1 == n { f = 1 } END { exit !f }' && { echo "err  mcp server '$r' is also in system/sandbox.conf"; bad=1; }
+    n="$(app_lines mcp | awk -v r="$r" -v me="$name" -v skip="${SKIP_APP:-}" '$2 == r && $1 != me && $1 != skip { print $1; exit }')"
+    [ -z "$n" ] || { echo "err  mcp server '$r' is already the app '$n''s"; bad=1; }
+  done
+  # Starter knowledge: pages an agent opens by name, so each is one named topic with a title.
+  for r in "$d"/knowledge/*; do
+    [ -e "$r" ] || continue; n="$(basename "$r")"
+    case "$n" in *.md) ;; *) echo "err  knowledge/$n: the app's knowledge is markdown pages, <topic>.md"; bad=1; continue ;; esac
+    [[ "${n%.md}" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "err  knowledge/$n: name it for the topic, lowercase words joined by '-'"; bad=1; }
+    head -1 "$r" | grep -q '^# .' || { echo "err  knowledge/$n: the first line is its title, '# <topic>'"; bad=1; }
+  done
+  for pb in $(names_in "$d/playbooks"); do
+    out="$(check_playbook "$d/playbooks/$pb")" || bad=1
+    [ -n "$out" ] && echo "$out" | sed -E "s/^(err|note) +/\1 playbook $pb: /"
+  done
+  out="$(app_conflicts)"
+  [ -n "$out" ] && { echo "$out" | sed 's/^/err  /'; bad=1; }
+  return "$bad"
+}
+
+app_check_report() { # name|dir -> renders app_check; dies when any err
+  local d="$1" out
+  [ -d "$d" ] || d="$SYS/apps/$1"
+  [ -d "$d" ] || die "no app '$1' (installed: $(names_in "$SYS/apps" | tr '\n' ' '))"
+  # A folder outside system/apps is checked as if it were installed, so its roles resolve.
+  if [ "$(cd "$d/.." && pwd -P)" = "$(cd "$SYS/apps" 2>/dev/null && pwd -P)" ]; then out="$(app_check "$d")" || true
+  else out="$(EXTRA_ROOT="$d" SKIP_APP="$(basename "$d")" app_check "$d")" || true; fi
+  [ -z "$out" ] && { info "app '$(basename "$d")' passes"; return 0; }
+  echo "$out" | sed 's/^err  */  ✗ /; s/^note */  · /'
+  echo "$out" | grep -q '^err ' && die "app '$(basename "$d")' does not pass"
+  return 0
+}
+
+app_busy() { # name -> the projects partway through one of its playbooks
+  local pb; for pb in $(names_in "$SYS/apps/$1/playbooks"); do playbook_in_flight "$pb"; done
+}
+
+app_url() { # source -> something git clone takes
+  case "$1" in *://*|*@*:*|/*|.*) echo "$1" ;; *) echo "https://github.com/$1" ;; esac
+}
+
+# Three copies of an installed app, so that what this brain learned stays this brain's:
+#   system/apps/<name>/        the app as this brain runs it. brain evolve, the cockpit's
+#                              editors and Adjust playbook change it in place — locally.
+#   system/apps/.base/<name>/  the app exactly as it was installed, untouched: what
+#                              `brain app diff` compares against and `revert` goes back to.
+#   the app's repo             what everyone gets. Only its developer changes it, by hand or
+#                              with `brain app promote` (APPS_DEV in brain.conf).
+# An update is a three-way merge per file (git merge-file), base -> local and base -> new
+# upstream, so a lesson learned here survives the next version of the app.
+app_base() { echo "$SYS/apps/.base/$1"; }
+
+tree_files() { # dir... -> every file path under any of them, relative, sorted, once
+  local d; for d in "$@"; do [ -d "$d" ] && (cd "$d" && find . -type f ! -name .DS_Store | sed 's|^\./||'); done | sort -u
+}
+same_file() { # a b -> both absent, or both present with the same bytes
+  if [ ! -e "$1" ] && [ ! -e "$2" ]; then return 0; fi
+  [ -f "$1" ] && [ -f "$2" ] && cmp -s "$1" "$2"
+}
+put_file() { # src dest -> dest becomes src, or stays absent when src is
+  [ -f "$1" ] || return 0; mkdir -p "$(dirname "$2")"; cp -p "$1" "$2"
+}
+merge_trees() { # base ours theirs out -> out = ours and theirs merged against base. Prints
+  # "conflict <path>" for each file both changed in ways that do not merge (out keeps ours
+  # with git's conflict markers). Non-zero on any conflict. ONLY_FILES (newline list), when
+  # set, limits theirs to those paths: everything else is ours.
+  local B="$1" O="$2" T="$3" X="$4" f bad=0
+  rm -rf "$X"; mkdir -p "$X"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if [ -n "${ONLY_FILES:-}" ] && ! printf '%s\n' "$ONLY_FILES" | grep -qxF "$f"; then put_file "$O/$f" "$X/$f"; continue; fi
+    if same_file "$O/$f" "$T/$f" || same_file "$T/$f" "$B/$f"; then put_file "$O/$f" "$X/$f"
+    elif same_file "$O/$f" "$B/$f"; then put_file "$T/$f" "$X/$f"
+    elif [ -f "$B/$f" ] && [ -f "$O/$f" ] && [ -f "$T/$f" ]; then
+      put_file "$O/$f" "$X/$f"
+      git merge-file -q -L local -L base -L upstream "$X/$f" "$B/$f" "$T/$f" || { echo "conflict $f"; bad=1; }
+    else
+      # Added on both sides differently, or deleted on one side and changed on the other.
+      put_file "$O/$f" "$X/$f"; echo "conflict $f"; bad=1
+    fi
+  done < <(tree_files "$B" "$O" "$T")
+  return "$bad"
+}
+app_changes() { # name -> the paths this brain changed since install ("M path", "A path", "D path")
+  local L="$SYS/apps/$1" B; B="$(app_base "$1")"; [ -d "$B" ] || return 0
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if [ ! -f "$B/$f" ]; then echo "A $f"; elif [ ! -f "$L/$f" ]; then echo "D $f"; elif ! cmp -s "$B/$f" "$L/$f"; then echo "M $f"; fi
+  done < <(tree_files "$B" "$L")
+}
+
+app_fetch() { # name src path dest -> dest holds the app's folder; prints the commit
+  local name="$1" src="$2" path="$3" dest="$4" repo tmp="" commit
+  if [ -d "$src" ]; then
+    repo="$(cd "$src" && pwd -P)"; commit="$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo local)"
+  else
+    tmp="$(mktemp -d)"
+    info "fetching $(app_url "$src")" >&2
+    git clone -q --depth 1 "$(app_url "$src")" "$tmp/repo" || { rm -rf "$tmp"; die "could not clone $src (check the URL and your git access)"; }
+    repo="$tmp/repo"; commit="$(git -C "$repo" rev-parse HEAD)"
+  fi
+  [ -f "$repo/${path:+$path/}app.conf" ] || { rm -rf "$tmp"; die "no app at '${path:-.}' in $src (no app.conf there)"; }
+  rm -rf "$dest"; mkdir -p "$(dirname "$dest")"
+  cp -R "$repo/${path:+$path/}." "$dest"; rm -rf "$dest/.git"; [ -n "$tmp" ] && rm -rf "$tmp"
+  echo "$commit"
+}
+
+# What the apps repo (APPS_SOURCE) offers, for the Studio's Apps page: memory/.apps-catalog,
+# a "# <source> <commit> <date>" header, then one tab-separated line per app: name, version,
+# label, icon, what it brings beyond roles and playbooks, whether the installed copy is
+# behind (yes|no, - when not installed from this source) and its description (app.conf's
+# description line, else the first paragraph of its README). Each README is kept beside it
+# in memory/.apps-catalog.d/ for the app's page. Behind = the repo's folder differs from
+# system/apps/.base/<name>, the copy as installed.
+app_catalog() {
+  local src tmp="" repo commit d n flags upd desc out="$MEM/.apps-catalog"
+  src="$(setting APPS_SOURCE pshiuu/agent-brain-apps)"
+  if [ -d "$src" ]; then repo="$(cd "$src" && pwd -P)"; commit="$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo local)"
+  else
+    tmp="$(mktemp -d)"
+    git clone -q --depth 1 "$(app_url "$src")" "$tmp/repo" || { rm -rf "$tmp"; die "could not clone $src (check the URL and your git access)"; }
+    repo="$tmp/repo"; commit="$(git -C "$repo" rev-parse HEAD)"
+  fi
+  rm -rf "$out.d.tmp"; mkdir -p "$out.d.tmp"
+  { printf '# %s %s %s\n' "$src" "$commit" "$(date '+%F %H:%M')"
+    for d in "$repo"/*/; do
+      [ -f "$d/app.conf" ] || continue; n="$(basename "$d")"; flags=""
+      [ -f "$d/ui/main.js" ] && flags="$flags,code"
+      [ -f "$d/cli.sh" ] && flags="$flags,commands"
+      grep -qE '^(secret|setting)[[:space:]]' "$d/app.conf" && flags="$flags,settings"
+      [ -n "$(app_field "$d" requires)" ] && flags="$flags,requires:$(app_field "$d" requires | tr ' ' '+')"
+      upd=-
+      if [ -d "$(app_base "$n")" ] && awk -v n="$n" -v s="$src" '$1 == n && $2 == s { f = 1 } END { exit !f }' "$SYS/apps.lock" 2>/dev/null; then
+        if diff -rq -x .git "${d%/}" "$(app_base "$n")" >/dev/null 2>&1; then upd=no; else upd=yes; fi
+      fi
+      desc="$(app_field "$d" description)"
+      [ -n "$desc" ] || desc="$(awk 'NR == 1 && /^#/ { next } NF { p = p (p ? " " : "") $0; next } p { exit } END { print p }' "$d/README.md" 2>/dev/null)"
+      [ -f "$d/README.md" ] && cp "$d/README.md" "$out.d.tmp/$n.md"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$(app_field "$d" version)" "$(app_field "$d" label)" "$(app_field "$d" icon)" "${flags#,}" "$upd" "$(printf '%s' "$desc" | tr '\t' ' ')"
+    done
+  } > "$out.tmp" && mv "$out.tmp" "$out"
+  rm -rf "$out.d"; mv "$out.d.tmp" "$out.d"
+  [ -n "$tmp" ] && rm -rf "$tmp"
+  info "catalog: $(grep -vc '^#' "$out") app(s) in $src (${commit:0:12})"
+}
+
+# The Studio's Apps page: memory/.apps-request is "<verb> <name> [trust] [force]", moved to
+# .apps-running while it runs. What the terminal would ask is in the request instead: trust
+# for an app with Studio code, force for removing one this brain changed. The result is
+# memory/.apps-status: "<ok|error> <verb> <name> <date>", then what brain printed.
+apps_request() {
+  local verb name flags out ok=ok
+  read -r verb name flags < "$MEM/.apps-running" || true
+  out="$(apps_do "$verb" "${name:-}" "${flags:-}" 2>&1)" || ok=error
+  { echo "$ok $verb ${name:-} $(date '+%F %H:%M')"; printf '%s\n' "$out"; } > "$MEM/.apps-status"
+  rm -f "$MEM/.apps-running"
+}
+
+apps_do() { # verb name flags -> runs in apps_request's command substitution, so die and export stay there
+  local verb="$1" name="$2" skills=""
+  export BRAIN_NONINTERACTIVE=1
+  case " $3 " in *" trust "*) export BRAIN_TRUST_APP="$name" ;; esac
+  case " $3 " in *" force "*) export BRAIN_FORCE=1 ;; esac
+  case "$verb" in
+    catalog) app_catalog; return ;;
+    install|update|remove|revert) ;;
+    *) die "the Studio asked for '$verb', which is not an app command" ;;
+  esac
+  [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "'$name' is not an app name"
+  if [ "$verb" = install ]; then [ ! -d "$SYS/apps/$name" ] || die "'$name' is already installed"
+  else [ -d "$SYS/apps/$name" ] || die "no app '$name' installed"; fi
+  app_has_skills "$name" && skills=1
+  cmd_app "$verb" "$name"
+  # What the terminal would tell you to run next, done here: the Studio has no terminal.
+  app_has_skills "$name" && skills=1
+  # remove syncs on its own, in app_remove, so the terminal gets it too.
+  if [ -n "$skills" ] && [ "$verb" != revert ] && [ "$verb" != remove ]; then cmd_sync_skills; fi
+  if grep -qE '^(mcp|allow)[[:space:]]' "$SYS/apps/$name/app.conf" 2>/dev/null; then cmd_sync_sandbox; fi
+  app_catalog
+}
+app_has_skills() { compgen -G "$SYS/apps/$1/skills/*/" >/dev/null || [ -f "$SYS/apps/$1/skills.list" ]; }
+
+app_install() { # name [--from <git-url|owner/repo|dir> [path]] — install, or update when installed
+  local name="${1:-}" src path commit new merged out busy conflicts base had=""
+  [ -n "$name" ] || die "usage: brain app install <name> [--from <git-url|owner/repo|dir> [path]]"
+  [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "'$name' is not a usable app name"
+  shift; src="$(setting APPS_SOURCE pshiuu/agent-brain-apps)"; path="$name"
+  # An update comes from where the app came from, unless told otherwise.
+  [ -d "$SYS/apps/$name" ] && read -r _ src _ path < <(awk -v n="$name" '$1 == n' "$SYS/apps.lock" 2>/dev/null) || true
+  [ -n "$src" ] || src="$(setting APPS_SOURCE pshiuu/agent-brain-apps)"; [ -n "$path" ] || path="$name"
+  if [ "${1:-}" = --from ]; then src="${2:?--from needs a git URL, owner/repo or a folder}"; path="${3:-$name}"; fi
+  [ "$path" = . ] && path=""
+  base="$(app_base "$name")"
+  if [ -d "$SYS/apps/$name" ]; then
+    had=1
+    busy="$(app_busy "$name" | sort -u | tr '\n' ' ')"
+    [ -z "$busy" ] || die "'$name' is in use by projects partway through its playbooks: $busy— finish them first"
+    # Installed before the base was kept: take the copy as it is for the base.
+    [ -d "$base" ] || { mkdir -p "$(dirname "$base")"; cp -R "$SYS/apps/$name" "$base"; }
+  fi
+  mkdir -p "$SYS/apps"; new="$SYS/apps/.$name.new"; merged="$SYS/apps/.$name.merged"
+  commit="$(app_fetch "$name" "$src" "$path" "$new")" || exit 1
+  if [ -n "$had" ]; then
+    rm -rf "$SYS/apps/.$name.conflicts"
+    if ! conflicts="$(merge_trees "$base" "$SYS/apps/$name" "$new" "$merged")"; then
+      mv "$merged" "$SYS/apps/.$name.conflicts"; rm -rf "$new"
+      printf '%s\n' "$conflicts" | sed 's/^conflict /  ✗ /'
+      die "'$name' was not updated: this brain and the new version both changed those files. The merge, with git's markers, is in system/apps/.$name.conflicts/ — settle them in the app (or brain app revert $name <file>), then update again"
+    fi
+  else cp -R "$new" "$merged"; fi
+  out="$(EXTRA_ROOT="$merged" SKIP_APP="$name" app_check "$merged" "$name")" || {
+    echo "$out" | sed 's/^err  */  ✗ /; s/^note */  · /'; rm -rf "$new" "$merged"; die "'$name' was not installed: it does not pass brain app check"; }
+  [ -n "$out" ] && echo "$out" | sed 's/^note */  · /'
+  # A trust click for code that runs in the Studio: ui/main.js can call every cockpit API.
+  # Asked again whenever that code is new or changed upstream.
+  if [ -f "$new/ui/main.js" ] && ! same_file "$new/ui/main.js" "$base/ui/main.js" && [ "${BRAIN_TRUST_APP:-}" != "$name" ]; then
+    if interactive; then
+      case "$(ask "'$name' runs its own code in your Studio (ui/main.js), with the same access the Studio has. Trust it? (y/N)")" in
+        y|Y|yes) ;; *) rm -rf "$new" "$merged"; die "not installed" ;;
+      esac
+    else rm -rf "$new" "$merged"; die "'$name' runs code in the Studio — install it at a terminal, or set BRAIN_TRUST_APP=$name"; fi
+  fi
+  rm -rf "$SYS/apps/$name" "$base"; mv "$merged" "$SYS/apps/$name"
+  mkdir -p "$(dirname "$base")"; mv "$new" "$base"
+  { grep -v "^$name " "$SYS/apps.lock" 2>/dev/null || true; echo "$name $src $commit ${path:-.}"; } | sort > "$SYS/apps.lock.tmp"
+  mv "$SYS/apps.lock.tmp" "$SYS/apps.lock"
+  info "$([ -n "$had" ] && echo updated || echo installed) $name $(app_field "$SYS/apps/$name" version) from $src (${commit:0:12})"
+  [ -n "$had" ] && [ -n "$(app_changes "$name")" ] && info "this brain's own changes to it are kept — brain app diff $name"
+  if compgen -G "$SYS/apps/$name/skills/*/" >/dev/null || [ -f "$SYS/apps/$name/skills.list" ]; then
+    info "it brings skills — put them in the sandbox store with: brain sync-skills"
+  fi
+  grep -qE '^(mcp|allow)[[:space:]]' "$SYS/apps/$name/app.conf" \
+    && info "it brings MCP servers or network rules — register them with: brain sync-sandbox"
+  grep -qE '^(secret|setting)[[:space:]]' "$SYS/apps/$name/app.conf" \
+    && info "it has settings: the Studio's Admin → $(app_field "$SYS/apps/$name" label)"
+  return 0
+}
+
+app_diff() { # name [file...] -> what this brain changed in the app, as a unified diff
+  local name="${1:-}" B; [ -n "$name" ] || die "usage: brain app diff <name> [file...]"
+  [ -d "$SYS/apps/$name" ] || die "no app '$name' installed"; shift
+  B="$(app_base "$name")"; [ -d "$B" ] || die "'$name' has no base copy (installed before brain app kept one) — reinstall it to start one"
+  [ -n "$(app_changes "$name")" ] || { info "'$name' is exactly as installed"; return 0; }
+  (cd "$SYS/apps" && diff -ruN ".base/$name${1:+/$1}" "$name${1:+/$1}") || true
+}
+
+app_revert() { # name [file...] -> back to the installed version: every file, or the ones named
+  local name="${1:-}" B f; [ -n "$name" ] || die "usage: brain app revert <name> [file...]"
+  [ -d "$SYS/apps/$name" ] || die "no app '$name' installed"; shift
+  B="$(app_base "$name")"; [ -d "$B" ] || die "'$name' has no base copy to go back to"
+  if [ $# -eq 0 ]; then rm -rf "$SYS/apps/$name"; cp -R "$B" "$SYS/apps/$name"; info "'$name' is back to the installed version"; return 0; fi
+  for f in "$@"; do
+    if [ -f "$B/$f" ]; then mkdir -p "$(dirname "$SYS/apps/$name/$f")"; cp -p "$B/$f" "$SYS/apps/$name/$f"; else rm -f "$SYS/apps/$name/$f"; fi
+    info "reverted $name/$f"
+  done
+}
+
+# For the app's developer: this brain's changes, or the files named, merged into a checkout of
+# the apps repo (APPS_DEV in brain.conf). Nothing is committed or pushed — that stays a person's
+# decision, after reading the diff there. Everyone else gets it with their next update.
+app_promote() { # name [file...]
+  local name="${1:-}" dev path B out conflicts
+  [ -n "$name" ] || die "usage: brain app promote <name> [file...]"; shift
+  dev="$(setting APPS_DEV "")"
+  [ -n "$dev" ] || die "promote is for an app's developer: set APPS_DEV in system/brain.local.conf to your checkout of the apps repo"
+  dev="${dev/#\~/$HOME}"
+  [ -d "$dev/.git" ] || die "APPS_DEV=$dev is not a git checkout"
+  [ -d "$SYS/apps/$name" ] || die "no app '$name' installed"
+  read -r _ _ _ path < <(awk -v n="$name" '$1 == n' "$SYS/apps.lock"); [ "$path" = . ] && path=""
+  [ -d "$dev/${path:-.}" ] || die "no folder '${path:-.}' in $dev"
+  B="$(app_base "$name")"; [ -d "$B" ] || die "'$name' has no base copy to compare with"
+  [ -n "$(app_changes "$name")" ] || { info "'$name' has no changes of this brain's to promote"; return 0; }
+  out="$(mktemp -d)/merged"
+  if ! conflicts="$(ONLY_FILES="$(printf '%s\n' "$@")" merge_trees "$B" "$dev/${path:-.}" "$SYS/apps/$name" "$out")"; then
+    printf '%s\n' "$conflicts" | sed 's/^conflict /  ✗ /'
+    rm -rf "$(dirname "$out")"; die "not promoted: the apps repo changed those files too since this brain installed '$name'"
+  fi
+  # Replace the folder's files with the merge, keeping the repo's own .git untouched.
+  (cd "$dev/${path:-.}" && find . -type f ! -path './.git/*' -delete)
+  cp -R "$out/." "$dev/${path:-.}/"; rm -rf "$(dirname "$out")"
+  git -C "$dev" --no-pager diff --stat -- "${path:-.}" || true
+  info "in $dev now: read it with git diff, commit and push it; then brain app install $name brings it back here as the new base"
+}
+
+app_remove() { # name
+  local name="${1:-}" busy users
+  [ -n "$name" ] || die "usage: brain app remove <name>"
+  [ -d "$SYS/apps/$name" ] || die "no app '$name' installed"
+  busy="$(app_busy "$name" | sort -u | tr '\n' ' ')"
+  [ -z "$busy" ] || die "'$name' is in use by projects partway through its playbooks: $busy— finish them first"
+  users="$(for pb in $(names_in "$SYS/apps/$name/playbooks"); do playbook_projects "$pb"; done | sort -u | tr '\n' ' ')"
+  [ -n "$users" ] && info "finished projects that ran its playbooks keep their record but cannot run again until it is back: $users"
+  # What this brain learned into the app is not in git and not upstream: removing loses it.
+  if [ -n "$(app_changes "$name")" ]; then
+    info "this brain changed $(app_changes "$name" | wc -l | tr -d ' ') file(s) in '$name' (brain app diff $name) — removing it loses them"
+    interactive || [ "${BRAIN_FORCE:-}" = 1 ] || die "kept: '$name' has changes of this brain's. Save them first (brain app diff $name > file), or BRAIN_FORCE=1"
+  fi
+  if interactive; then
+    case "$(ask "remove system/apps/$name? Reinstall brings it back (y/N)")" in y|Y|yes) ;; *) die "kept" ;; esac
+  fi
+  local skills=""; app_has_skills "$name" && skills=1
+  rm -rf "$SYS/apps/$name" "$(app_base "$name")"
+  [ -f "$SYS/apps.lock" ] && { grep -v "^$name " "$SYS/apps.lock" > "$SYS/apps.lock.tmp" || true; mv "$SYS/apps.lock.tmp" "$SYS/apps.lock"; }
+  info "removed $name: its playbooks, roles and skills go with it"
+  # Its skills are still in sbx's store until a sync prunes what no root declares any more.
+  if [ -n "$skills" ]; then
+    if command -v sbx >/dev/null; then cmd_sync_skills; else info "its skills leave the sandbox store on the next: brain sync-skills"; fi
+  fi
+}
+
+# Uninstalling an app hides the pages tagged with it (no scope names the tag any more) and
+# deletes nothing. Forgetting it, asked for by name, moves the pages that are only its out of
+# knowledge/ and index.md into archive/, still tracked and still there to read. A page another
+# tag still reads stays where it is.
+app_forget() { # name
+  local name="${1:-}" f base dest tags moved="" kept="" idx="$MEM/index.md"
+  [ -n "$name" ] || die "usage: brain app forget <name>"
+  [ -f "$SYS/apps/$name/app.conf" ] && die "'$name' is installed and its projects read those pages — brain app remove $name first"
+  for f in "$MEM"/knowledge/*.md; do
+    [ -f "$f" ] || continue
+    tags="$(page_tags "$f" | paste -sd' ' - || true)"
+    case " $tags " in *" $name "*) ;; *) continue ;; esac
+    base="$(basename "$f")"
+    [ "$tags" = "$name" ] || { kept="$kept $base"; continue; }
+    mkdir -p "$MEM/archive/knowledge"; dest="$MEM/archive/knowledge/$base"
+    [ -e "$dest" ] && dest="$MEM/archive/knowledge/${base%.md}-$(date +%F-%H%M%S).md"
+    mv "$f" "$dest"; moved="$moved $base"
+    # Its index line, then a "### " heading left with no page under it.
+    [ -f "$idx" ] && awk -v n="(knowledge/$base)" '
+      !/^[[:space:]]*<!--/ && index($0, n) { next }
+      /^### / { h = $0; gap = ""; next }
+      h != "" && !NF { gap = gap "\n"; next }
+      h != "" && /^#/ { h = ""; gap = "" }
+      h != "" { print h; printf "%s", gap; h = ""; gap = "" }
+      { print }
+    ' "$idx" > "$idx.tmp" && mv "$idx.tmp" "$idx"
+  done
+  if [ -n "$moved" ]; then info "moved to memory/archive/knowledge/:$moved"; else info "no page is tagged '$name' alone"; fi
+  [ -z "$kept" ] || info "kept, another tag still reads them (take '$name' out of their tags: line and index.md heading by hand):$kept"
+  [ -z "$moved" ] || commit_memory "forget $name"
+}
+
+app_list() {
+  local d n found=0
+  for d in "$SYS"/apps/*/; do
+    [ -f "$d/app.conf" ] || continue; found=1; n="$(basename "$d")"
+    printf '  %-14s %-9s %s\n' "$n" "$(app_field "$d" version)" "$(app_field "$d" label)"
+    [ -n "$(app_changes "$n")" ] && printf '  %-14s %s file(s) changed by this brain — brain app diff %s\n' "" "$(app_changes "$n" | wc -l | tr -d ' ')" "$n"
+    awk -v n="$n" '$1 == n { printf "  %-14s from %s @ %s\n", "", $2, substr($3, 1, 12) }' "$SYS/apps.lock" 2>/dev/null
+  done
+  [ "$found" = 1 ] || echo "  no apps installed. Install one with: brain app install <name>"
+}
+
+app_test() { # [name] -> runs each app's test/*.sh; non-zero when any fails
+  local d t fail=0 ran=0
+  for d in "$SYS"/apps/*/; do
+    [ -f "$d/app.conf" ] || continue
+    [ -n "${1:-}" ] && [ "$(basename "$d")" != "$1" ] && continue
+    for t in "$d"/test/*.sh; do
+      [ -f "$t" ] || continue; ran=1
+      echo "▸ $(basename "$d")/test/$(basename "$t")"
+      BRAIN="$BRAIN" bash "$t" || fail=1
+    done
+  done
+  [ "$ran" = 1 ] || info "no app tests${1:+ for $1}"
+  return "$fail"
+}
+
+cmd_app() {
+  local verb="${1:-list}"; [ $# -gt 0 ] && shift
+  case "$verb" in
+    list)    app_list ;;
+    install|update) app_install "$@" ;;
+    diff)    app_diff "$@" ;;
+    revert)  app_revert "$@" ;;
+    promote) app_promote "$@" ;;
+    remove)  app_remove "$@" ;;
+    forget)  app_forget "$@" ;;
+    check)   [ -n "${1:-}" ] || die "usage: brain app check <name|dir>"; app_check_report "$1" ;;
+    catalog) app_catalog; grep -v '^#' "$MEM/.apps-catalog" | awk -F '\t' '{ printf "  %-14s %-9s %s%s\n", $1, $2, $3, ($6 == "yes" ? "   (update available)" : "") }' ;;
+    test)    app_test "$@" ;;
+    *) die "usage: brain app list | install|update <name> [--from <git-url|owner/repo|dir> [path]] | diff|revert <name> [file...] | promote <name> [file...] | remove <name> | forget <name> | check <name|dir> | test [name] | catalog" ;;
+  esac
+}
+
+# `brain update`: the base from upstream. This folder is a checkout of the base. Its own
+# settings (brain.local.conf, apps.lock, skills.lock, config/) are files git ignores, so they
+# never travel; what evolve taught it is commits of its own, so an update is a merge that
+# stops on a real conflict, the same deal
+# `brain app update` gives an app. memory/ is its own repo and is not touched. git writes a
+# changed file as a new one, so a running bin/brain keeps reading the old.
+cmd_update() {
+  git -C "$BRAIN" rev-parse --git-dir >/dev/null 2>&1 || die "$BRAIN is not a git checkout of the base"
+  git -C "$BRAIN" diff --quiet HEAD -- 2>/dev/null || die "the base has uncommitted changes — commit them first: git -C $BRAIN status"
+  git -C "$BRAIN" pull --no-rebase --no-edit || die "the merge stopped: resolve it (git -C $BRAIN status), commit, then run $BRAIN/install.sh"
+  info "the base is current; applying it (install.sh: templates, skills, the watcher, the cockpit)"
+  exec "$BRAIN/install.sh"
+}
+
+# `brain test`: everything that says the brain works, base and apps, in one run. The list
+# AGENTS.md used to keep by hand.
+# `brain test --fresh`: the same, on what someone else gets — this checkout's files minus
+# everything git ignores (memory, installed apps, this brain's settings), with an empty memory.
+cmd_test_fresh() {
+  local tmp; tmp="$(mktemp -d)"
+  git -C "$BRAIN" ls-files -z -co --exclude-standard | (cd "$BRAIN" && tar --null -T - -cf -) | tar -C "$tmp" -xf - \
+    || { rm -rf "$tmp"; die "could not copy the base's files"; }
+  ( BRAIN="$tmp"; MEM="$tmp/memory"; memory_init >/dev/null )
+  info "a fresh copy of the base in $tmp: no memory, no apps, none of this brain's settings"
+  BRAIN="$tmp" "$tmp/bin/brain" test; local rc=$?
+  rm -rf "$tmp"; return "$rc"
+}
+
+cmd_test() {
+  [ "${1:-}" = --fresh ] && { cmd_test_fresh; return; }
+  local fail=0 t n
+  step() { echo; echo "━━ $1"; shift; "$@" || { fail=1; echo "✗ $1 failed"; }; }
+  step "bin/brain syntax" bash -n "$BRAIN/bin/brain"
+  for t in "$BRAIN"/test/*.sh; do [ "$(basename "$t")" = lib.sh ] || step "test/$(basename "$t")" bash "$t"; done
+  for t in "$BRAIN"/test/*.mjs "$BRAIN"/ui/test.mjs; do step "${t#"$BRAIN"/}" node "$t"; done
+  step "memory wiki" cmd_lint
+  for n in $(all_in playbooks); do step "playbook $n" report_playbook "$(playbook_dir "$n")"; done
+  for n in $(names_in "$SYS/apps"); do step "app $n" app_check_report "$n"; done
+  step "app tests" app_test
+  echo
+  [ "$fail" = 0 ] && { info "brain test: everything passes"; return 0; }
+  die "brain test: something failed (scroll up for ✗)"
+}
+
+# Sourcing the launcher gives you its functions and runs nothing. That is how
+# test/state.sh exercises next_phase / fix_pending / phase_finished — the three
+# functions that decide what runs next — against fake marker files, with no sandbox.
+[ -n "${BRAIN_LIB:-}" ] && return 0
+
+# Braced, and it exits. Bash reads a script as it goes, so when the last command finishes
+# it comes back for more input at the offset it had reached — and if the file grew in the
+# meantime (you edited the launcher while a long `brain auto` was running) that offset now
+# lands mid-file and bash executes the fragment it finds there. A brace group is parsed
+# whole before any of it runs, and the exit inside it means there is never a next read.
+{ case "${1:-}" in
+  init)        shift; cmd_init "$@" ;;
+  sync-skills) shift; cmd_sync_skills ;;
+  sync-sandbox) shift; cmd_sync_sandbox ;;
+  playbooks)   shift; cmd_playbooks ;;
+  app)         shift; cmd_app "$@" ;;
+  test)        shift; cmd_test "$@" ;;
+  new)         shift; cmd_new "$@" ;;
+  playbook)    shift; cmd_playbook "$@" ;;
+  role)        shift; cmd_role "$@" ;;
+  run)         shift; cmd_run "$@" ;;
+  auto)        shift; cmd_auto ;;
+  open)        shift; cmd_open "$@" ;;
+  up)          shift; cmd_up "$@" ;;
+  down)        shift; cmd_down "$@" ;;
+  evolve)      shift; cmd_evolve "$@" ;;
+  update)      shift; cmd_update ;;
+  status)      shift; cmd_status ;;
+  lint)        shift; cmd_lint ;;
+  approve)     shift; cmd_approve "$@" ;;
+  reject)      shift; cmd_reject "$@" ;;
+  reopen)      shift; cmd_reopen "$@" ;;
+  watch)       shift; cmd_watch "$@" ;;
+  *) if app_cli "${1:-}"; then
+       a="$1"; shift; declare -F "cmd_$a" >/dev/null || die "the $a app's cli.sh defines no cmd_$a"; "cmd_$a" "$@"
+     else awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; fi ;;
+esac
+  exit $?
+}

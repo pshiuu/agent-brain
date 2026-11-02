@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin</title>
+<link rel="preload" href="vendor/geist/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="vendor/phosphor/style.css">
+<link rel="stylesheet" href="shared.css">
+<link rel="stylesheet" href="style.css">
+<script src="shared.js"></script>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='4' fill='%23171717'/><circle cx='11' cy='5' r='2.2' fill='%23A3A3A3'/></svg>">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <a class="ws" href="#/" title="The terminal runs phases. This edits and watches."><span class="logo" aria-hidden="true"><i class="ph ph-gear-six"></i></span><b>Admin</b></a>
+    <nav id="nav" aria-label="Admin"></nav>
+    <footer class="foot">
+      <a id="checks" class="nav-item" href="#/"></a>
+      <div id="undo" title="Every edit made here is a change in this folder, and its diff is the undo"></div>
+      <a class="nav-item" href="/" title="Studio, where articles are written and reviewed"><i class="ph ph-pen-nib" aria-hidden="true"></i><span class="label">Studio</span></a>
+    </footer>
+    <label class="switch theme"><span class="label"><i class="ph ph-moon" aria-hidden="true"></i><span>Dark mode</span></span><input type="checkbox" role="switch" id="theme"></label>
+  </aside>
+  <main id="view" aria-live="polite"></main>
+</div>
+<script src="app.js" type="module"></script>
+</body>
+</html>

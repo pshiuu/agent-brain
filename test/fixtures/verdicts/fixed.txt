@@ -1,0 +1,2 @@
+qa.stale-global-save: revalidate on every global save (c895816).
+qa.soft-404 now 404s.

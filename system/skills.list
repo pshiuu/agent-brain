@@ -1,0 +1,8 @@
+# External skills installed into sbx's shared store by `brain sync-skills` (and `brain init`).
+# One repo per line: <repo> [skill-name ...]   (no names = every skill in the repo)
+# Private repos: sbx runs `git clone` on your Mac, so HTTPS works with `gh auth setup-git`.
+# Only skills listed here (plus the brain's own) stay in the sandbox store; everything else
+# that `sbx skills import` picks up from your Mac is removed again. Extra host skills to keep:
+
+
+# Our private skill(s)

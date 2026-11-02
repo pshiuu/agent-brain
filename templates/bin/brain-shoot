@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# Visual QA: screenshots at 3 widths, plus the checks a screenshot cannot show —
+# computed contrast, an image audit, and page structure.
+#
+# A picture is weak evidence. The defects that survive a look at the screenshots are the
+# ones nobody can see in them: a control that renders at 0.75px, a form that paints all
+# its validation errors because `display:flex` outranks `[hidden]`, body text a quarter
+# below AA on a dark band, a hotlinked photo that 404s into an empty box. Those are all
+# decidable in the page, so they are decided here rather than left to how hard someone
+# happened to look.
+#
+# Usage: brain-shoot <outdir> <url> [url...]
+# Exit:  2 if anything failed a check, so a phase can gate on it.
+set -euo pipefail
+[ $# -ge 2 ] || { echo "usage: brain-shoot <outdir> <url> [url...]" >&2; exit 1; }
+out="$1"; shift
+mkdir -p "$out"
+node - "$out" "$@" <<'JS'
+const { chromium } = require('playwright');
+const [out, ...urls] = process.argv.slice(2);
+const widths = [375, 768, 1440];
+
+/* WCAG 2.1 AA over what the browser actually paints, tokens and all. Runs in the page:
+   walks ancestors for the effective background, composites alpha, and takes a
+   gradient's lightest stop as the honest worst case for text sitting on it. Only
+   elements holding their own text are judged, so a wrapper is not blamed for its
+   children. */
+const CONTRAST = () => {
+  const srgb = c => (c /= 255) <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  const lum = p => 0.2126 * srgb(p[0]) + 0.7152 * srgb(p[1]) + 0.0722 * srgb(p[2]);
+  const parse = s => {
+    const m = String(s).match(/rgba?\(([^)]+)\)/);
+    if (!m) return null;
+    const p = m[1].split(/[,\s\/]+/).filter(Boolean).map(Number);
+    return { rgb: [p[0], p[1], p[2]], a: p.length > 3 ? p[3] : 1 };
+  };
+  const over = (fg, bg) => fg.rgb.map((c, i) => c * fg.a + bg[i] * (1 - fg.a));
+  const gradientStop = cs => {
+    const bi = cs.backgroundImage;
+    if (!bi || bi === 'none') return null;
+    const stops = bi.match(/rgba?\([^)]+\)/g);
+    if (!stops) return null;
+    let worst = null, worstL = -1;
+    for (const s of stops) {
+      const c = parse(s);
+      if (!c || c.a === 0) continue;
+      const L = lum(c.rgb);
+      if (L > worstL) { worstL = L; worst = c; }
+    }
+    return worst;
+  };
+  const bgOf = el => {
+    const stack = [];
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
+      const cs = getComputedStyle(n);
+      const c = parse(cs.backgroundColor);
+      if (c && c.a > 0) { stack.push(c); if (c.a === 1) break; }
+      const g = gradientStop(cs);
+      if (g) { stack.push(g); if (g.a === 1) break; }
+    }
+    let base = [255, 255, 255];
+    for (let i = stack.length - 1; i >= 0; i--) base = over(stack[i], base);
+    return base;
+  };
+  const out = [], seen = new Set();
+  for (const el of document.querySelectorAll('body *')) {
+    if (el.hasAttribute('hidden') || el.closest('[hidden]')) continue;
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || +cs.opacity === 0) continue;
+    if (!Array.from(el.childNodes).some(n => n.nodeType === 3 && n.textContent.trim())) continue;
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    const fg = parse(cs.color);
+    if (!fg) continue;
+    const bg = bgOf(el);
+    const L1 = lum(over(fg, bg)), L2 = lum(bg);
+    const ratio = (Math.max(L1, L2) + 0.05) / (Math.min(L1, L2) + 0.05);
+    const px = parseFloat(cs.fontSize);
+    const need = (px >= 24 || (px >= 18.66 && parseInt(cs.fontWeight, 10) >= 700)) ? 3 : 4.5;
+    if (ratio + 0.005 >= need) continue;
+    const sel = el.tagName.toLowerCase() + (typeof el.className === 'string' && el.className.trim()
+      ? '.' + el.className.trim().split(/\s+/).join('.') : '');
+    // One row per selector+ratio: a repeated component is one defect, not forty.
+    const key = sel + '|' + ratio.toFixed(2);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ sel, text: el.textContent.trim().slice(0, 48), ratio: Math.round(ratio * 100) / 100, need, px: Math.round(px * 10) / 10 });
+  }
+  return out.slice(0, 40);
+};
+
+/* Broken and unlabelled images. The document's own status says nothing about a
+   hotlinked photo that 404s, which renders as an empty box and photographs as one. */
+const IMAGES = () => {
+  const out = { total: 0, broken: [], noalt: [] };
+  for (const i of document.querySelectorAll('img')) {
+    out.total++;
+    if (!i.complete || i.naturalWidth === 0) out.broken.push(i.currentSrc || i.src);
+    else if (!i.hasAttribute('alt')) out.noalt.push(i.currentSrc || i.src);
+  }
+  out.broken = out.broken.slice(0, 20);
+  out.noalt = out.noalt.slice(0, 20);
+  return out;
+};
+
+/* Structure: the things a reader's browser and a screen reader need and a picture
+   never shows. Deliberately not a full a11y audit — these are the ones that are
+   unambiguous, so every hit is a fix rather than a discussion. */
+const STRUCTURE = () => {
+  const issues = [];
+  if (!document.documentElement.lang) issues.push('no lang on <html>');
+  if (!document.title.trim()) issues.push('no <title>');
+  const h1 = document.querySelectorAll('h1').length;
+  if (h1 !== 1) issues.push('h1 count ' + h1);
+  const levels = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6')].map(h => +h.tagName[1]);
+  const skips = [];
+  for (let i = 1; i < levels.length; i++) if (levels[i] - levels[i - 1] > 1) skips.push(levels[i - 1] + '->' + levels[i]);
+  if (skips.length) issues.push('heading skips ' + skips.slice(0, 5).join(', '));
+  const main = document.querySelectorAll('main').length;
+  if (main !== 1) issues.push('main count ' + main);
+  const nameless = [...document.querySelectorAll('button,a,input,select,textarea')].filter(el => {
+    if (el.closest('[hidden]') || el.type === 'hidden') return false;
+    const label = el.id && document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+    const by = el.getAttribute('aria-labelledby');
+    return !((el.textContent || '').trim() || el.getAttribute('aria-label') || el.getAttribute('title') ||
+      (label && label.textContent.trim()) || (by && document.getElementById(by)?.textContent.trim()) ||
+      el.getAttribute('placeholder') || (el.tagName === 'A' && el.querySelector('img[alt]:not([alt=""])')));
+  }).map(el => el.tagName.toLowerCase() + (typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\s+/)[0] : ''));
+  if (nameless.length) issues.push('unnamed controls: ' + [...new Set(nameless)].slice(0, 8).join(', '));
+  const ids = new Set(), dup = [];
+  for (const e of document.querySelectorAll('[id]')) { if (ids.has(e.id)) dup.push(e.id); ids.add(e.id); }
+  if (dup.length) issues.push('duplicate ids: ' + [...new Set(dup)].slice(0, 5).join(', '));
+  // Styled to a size the layout then ignores: the icon that is 24px in the stylesheet
+  // and 0px on screen, because the element is still display:inline and inline boxes do
+  // not take width or height. Computed style says 24px, the painted rect says 0 — the
+  // disagreement is the defect, and it is invisible in a screenshot by definition.
+  const px = v => { const n = parseFloat(v); return Number.isFinite(n) && /px$/.test(v) ? n : null; };
+  const ghosts = [];
+  for (const el of document.querySelectorAll('body *')) {
+    const cs = getComputedStyle(el);
+    if (cs.display === 'contents') continue;
+    // Not rendered at all — an element inside a display:none ancestor keeps its computed
+    // width and reports a zero rect, which is a hidden mobile control, not a defect.
+    if (typeof el.checkVisibility === 'function' ? !el.checkVisibility() : (cs.display === 'none' || cs.visibility === 'hidden')) continue;
+    if (el.closest('[hidden]')) continue;
+    const r = el.getBoundingClientRect();
+    const w = px(cs.width), h = px(cs.height);
+    if ((w !== null && w >= 2 && r.width < 2) || (h !== null && h >= 2 && r.height < 2)) {
+      ghosts.push(el.tagName.toLowerCase() + (typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\s+/)[0] : '') +
+        ' styled ' + (w ?? '?') + 'x' + (h ?? '?') + ' paints ' + Math.round(r.width * 100) / 100 + 'x' + Math.round(r.height * 100) / 100);
+    }
+  }
+  if (ghosts.length) issues.push('sized but not painted: ' + [...new Set(ghosts)].slice(0, 5).join('; '));
+  return issues;
+};
+
+(async () => {
+  const browser = await chromium.launch();
+  const report = [];
+  for (const url of urls) {
+    for (const w of widths) {
+      const page = await browser.newPage({ viewport: { width: w, height: 900 } });
+      const errors = [];
+      page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
+      page.on('pageerror', e => errors.push(String(e)));
+      let status = null, contrast = [], images = null, structure = [];
+      try {
+        const res = await page.goto(url, { waitUntil: 'networkidle', timeout: 45000 });
+        status = res ? res.status() : null;
+        // A full-page capture never scrolls, so lazy images would photograph as empty
+        // boxes: promote them and wait for the decode before anything is judged.
+        await page.evaluate(() => {
+          for (const i of document.querySelectorAll('img[loading="lazy"]')) { i.loading = 'eager'; i.src = i.src; }
+        });
+        await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+        await page.waitForFunction(() => Array.from(document.images).every(i => i.complete), null, { timeout: 20000 }).catch(() => {});
+        await page.waitForTimeout(400);
+        contrast = await page.evaluate(CONTRAST).catch(() => []);
+        images = await page.evaluate(IMAGES).catch(() => null);
+        // Structure does not move with the viewport; checking it once keeps one defect
+        // from being reported three times.
+        if (w === widths[widths.length - 1]) structure = await page.evaluate(STRUCTURE).catch(() => []);
+      } catch (e) { errors.push('NAVIGATION: ' + e.message); }
+      const slug = url.replace(/^https?:\/\//, '').replace(/[^a-z0-9]+/gi, '_').slice(0, 80);
+      const file = `${out}/${slug}__${w}.png`;
+      // Chromium's fullPage capture drops content on very tall pages — loaded, decoded
+      // images came back as empty boxes on ~7900px pages. Growing the viewport to the
+      // document renders it once, in one pass, which is what a reader sees. Past
+      // ~15000px the viewport itself is refused, so fall back.
+      const docH = await page.evaluate(() => document.documentElement.scrollHeight).catch(() => 0);
+      if (docH && docH <= 15000) {
+        await page.setViewportSize({ width: w, height: docH });
+        await page.waitForTimeout(600);
+        await page.screenshot({ path: file }).catch(() => {});
+      } else {
+        await page.screenshot({ path: file, fullPage: true }).catch(() => {});
+      }
+      report.push({ url, width: w, status, screenshot: file, errors, contrast, images, structure });
+      await page.close();
+    }
+  }
+  await browser.close();
+  require('fs').writeFileSync(`${out}/report.json`, JSON.stringify(report, null, 2));
+  const problems = r => r.errors.length + (r.status >= 400 ? 1 : 0) + r.contrast.length +
+    (r.images ? r.images.broken.length + r.images.noalt.length : 0) + r.structure.length;
+  const bad = report.filter(r => problems(r) > 0);
+  const n = (k, f) => report.reduce((a, r) => a + f(r), 0);
+  console.log(`${report.length} shots -> ${out}/report.json`);
+  console.log(`  ${bad.length} with problems: ${n(0, r => r.contrast.length)} contrast, ` +
+    `${n(0, r => r.images ? r.images.broken.length : 0)} broken images, ` +
+    `${n(0, r => r.images ? r.images.noalt.length : 0)} without alt, ` +
+    `${n(0, r => r.structure.length)} structure, ${n(0, r => r.errors.length)} console`);
+  process.exit(bad.length ? 2 : 0);
+})();
+JS

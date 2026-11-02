@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Studio</title>
+<link rel="preload" href="vendor/geist/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="vendor/phosphor/style.css">
+<link rel="stylesheet" href="shared.css">
+<link rel="stylesheet" href="studio.css">
+<script src="shared.js"></script>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='4' fill='%23171717'/><circle cx='11' cy='5' r='2.2' fill='%23F8D749'/></svg>">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <a class="ws" href="#/"><span class="logo" aria-hidden="true"><i class="ph ph-pen-nib"></i></span><b>Studio</b></a>
+    <label class="search"><i class="ph ph-magnifying-glass" aria-hidden="true"></i><input id="q" type="search" placeholder="Search projects" aria-label="Search projects" autocomplete="off"></label>
+    <nav id="nav" aria-label="Studio"></nav>
+    <a class="admin" href="/admin" title="Playbooks, agents, skills and the full record"><i class="ph ph-gear-six" aria-hidden="true"></i>Admin</a>
+    <label class="switch theme"><span class="label"><i class="ph ph-moon" aria-hidden="true"></i><span>Dark mode</span></span><input type="checkbox" role="switch" id="theme"></label>
+  </aside>
+  <main id="view" aria-live="polite"></main>
+</div>
+<div id="toast" role="status" hidden></div>
+<script src="studio.js" type="module"></script>
+</body>
+</html>

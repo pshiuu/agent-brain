@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# One run's receipt: how long it ran, what it cost, and what the agent reached for.
+#
+# Read out of Claude Code's own session transcript, which is the only record of a run
+# that outlives the sandbox — and is written whether or not the phase went well, so a
+# phase that stalled leaves a receipt too.
+#
+# Usage: brain-runlog <out.json> [role.md]
+# Given the role file it also prints what the role declared against what the run
+# actually invoked, which is the one line of this report you can act on.
+set -euo pipefail
+out="${1:?usage: brain-runlog <out.json> [role.md]}"
+rolefile="${2:-}"
+root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
+
+# Newest transcript: one sbx run is one session, and brain stops the sandbox when the
+# phase ends, so the session that just finished is the most recently written file.
+f="$(ls -t "$root"/*/*.jsonl 2>/dev/null | head -1 || true)"
+[ -n "$f" ] || { echo "brain-runlog: no transcript under $root (codex runs keep none)" >&2; exit 1; }
+
+mkdir -p "$(dirname "$out")"
+# What the brain handed the agent to read is declared on the host (context.json); what it
+# actually opened is only here. Read calls under the brain's two mounts are the ones that
+# say whether memory was used — project code is not the question. Bash `cat` is not seen.
+prefixes="$(jq -cn --arg m "${BRAIN_MEMORY:-}" --arg s "${BRAIN_SYSTEM:-}" '[$m, $s] | map(select(length > 0) | sub("/*$"; "/"))')"
+# Two different de-duplications, because the transcript repeats an assistant entry up to
+# three times per message and the copies are NOT identical:
+#   tokens  — one entry per message.id. Usage is the same on every copy, so any one does.
+#   tools   — one entry per tool_use.id. Deduplicating these by message.id instead drops
+#             whole tool calls, because a message's content blocks are spread across its
+#             copies; that silently loses skills, which is the thing this file is for.
+jq -n --arg session "$(basename "$f" .jsonl)" --argjson pre "$prefixes" '
+  [inputs] as $L
+  | [$L[] | select(.type == "assistant")] as $R
+  | ($R | unique_by(.message.id)) as $A
+  | ([$R[].message.content[]? | select(.type == "tool_use")] | unique_by(.id)) as $T
+  | ([$L[].timestamp // empty] | min) as $start
+  | ([$L[].timestamp // empty] | max) as $end
+  | (def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+     if $start and $end then ($end | epoch) - ($start | epoch) else null end) as $secs
+  | {
+      session: $session,
+      model: ([$A[].message.model // empty] | last),
+      started: $start,
+      ended: $end,
+      seconds: $secs,
+      turns: ($A | length),
+      tokens: {
+        input:       ([$A[].message.usage.input_tokens // 0] | add),
+        output:      ([$A[].message.usage.output_tokens // 0] | add),
+        cache_read:  ([$A[].message.usage.cache_read_input_tokens // 0] | add),
+        cache_write: ([$A[].message.usage.cache_creation_input_tokens // 0] | add)
+      },
+      skills: ([$T[] | select(.name == "Skill") | .input.skill // empty] | unique),
+      reads: ([$T[] | select(.name == "Read") | .input.file_path // empty]
+        | map(select(. as $p | $pre == [] or any($pre[]; . as $x | $p | startswith($x)))) | unique),
+      tools: ($T | group_by(.name) | map({ key: .[0].name, value: length }) | from_entries)
+    }' "$f" > "$out.tmp"
+mv "$out.tmp" "$out"
+
+# The report, at the end of the run, where the person who just watched it is looking.
+declared=""
+[ -n "$rolefile" ] && [ -f "$rolefile" ] && declared="$(sed -n 's/^Skills:[[:space:]]*//p' "$rolefile" | head -1 | tr -d ' ' | tr ',' '\n' | grep -v '^brain$' | grep -v '^$' || true)"
+# The files BRAIN.md tells every agent to start from. Not reading one is not always
+# wrong, but a phase that went badly and never opened the brief is the first thing to see.
+session=""
+if [ -n "${BRAIN_MEMORY:-}" ]; then
+  session="$BRAIN_MEMORY/index.md
+$BRAIN_MEMORY/preferences.md
+${BRAIN_SYSTEM:+$BRAIN_SYSTEM/BRAIN.md}
+${BRAIN_PROJECT:+$BRAIN_MEMORY/projects/$BRAIN_PROJECT/brief.md}
+${BRAIN_PROJECT:+$BRAIN_MEMORY/projects/$BRAIN_PROJECT/decisions.md}"
+fi
+jq -r --arg declared "$declared" --arg session "$session" '
+  def k: if . >= 1000000 then "\(./1000000*10|floor/10)M" elif . >= 1000 then "\(./1000|floor)k" else "\(.)" end;
+  ($declared | split("\n") | map(select(length > 0))) as $d
+  | (.skills // []) as $used
+  | ($d - $used) as $missed
+  | (($session | split("\n") | map(select(length > 0))) - (.reads // [])) as $unread
+  | "",
+    "  run report",
+    "    ran for     \(((.seconds // 0) / 60) | floor) min over \(.turns // 0) turns   (\(.model // "?"))",
+    "    tokens      \(.tokens.output|k) out · \(.tokens.cache_read|k) cache read · \(.tokens.cache_write|k) cache write",
+    "    tools       \((.tools // {}) | to_entries | sort_by(-.value) | map("\(.key) \(.value)") | join(" · "))",
+    "    skills      \(if ($used|length) > 0 then ($used|join(", ")) else "none invoked" end)",
+    (if ($missed|length) > 0 then "    NOT USED    \($missed|join(", "))   (declared by the role, never invoked)" else empty end),
+    "    read        \((.reads // []) | length) brain files",
+    (if ($unread|length) > 0 then "    NOT READ    \($unread | map(split("/") | .[-1]) | join(", "))   (BRAIN.md says every session starts here)" else empty end),
+    ""
+' "$out"
+echo "  full report: $out"

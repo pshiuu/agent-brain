@@ -1,0 +1,29 @@
+# The cockpit. `./install.sh` writes `.env` beside this file (BRAIN, DEV_DIR,
+# COCKPIT_PORT, CODEX_MODELS) and starts it; by hand, run compose from this folder.
+# No container_name and no image name: compose derives both from the folder, so two
+# brains on one Mac each get their own cockpit instead of one replacing the other.
+services:
+  cockpit:
+    build: ./ui
+    # Loopback only. The cockpit has read-write access to the whole brain and no auth.
+    ports: ["127.0.0.1:${COCKPIT_PORT:-7777}:7777"]
+    environment:
+      # Host paths, so the copy-paste commands the UI renders actually work in your shell.
+      HOST_BRAIN: ${BRAIN:-${PWD}}
+      HOST_DEV: ${DEV_DIR:-${HOME}/dev}
+      BRAIN_MAX_FIX_LOOPS: ${BRAIN_MAX_FIX_LOOPS:-3}
+    volumes:
+      - ${BRAIN:-${PWD}}:/brain
+      # Read-only: the UI reads project code, it never writes there.
+      - ${DEV_DIR:-${HOME}/dev}:/dev-projects:ro
+      # Codex's own model catalog, so the model and effort lists match what your CLI
+      # actually offers instead of a hardcoded guess. Read-only, and it is only the
+      # catalog: credentials live in auth.json, which is never mounted. On a Mac without
+      # Codex, install.sh points CODEX_MODELS at an empty one — a missing source would
+      # make Docker create a folder where Codex later wants to write this file.
+      - ${CODEX_MODELS:-${CODEX_HOME:-${HOME}/.codex}/models_cache.json}:/codex-models.json:ro
+      # The UI is copied into the image at build time, so edits to ui/ need
+      # `docker compose up -d --build`. Uncomment to serve it from disk instead
+      # and a plain `docker compose restart` picks changes up.
+      # - ./ui:/app:ro
+    restart: unless-stopped

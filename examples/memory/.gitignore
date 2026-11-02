@@ -1,0 +1,27 @@
+# memory/ is this brain's own repo: what it learned, its clients and its knowledge. The base
+# around it (bin/, ui/, system/) is another repo, updated from upstream with `brain update`.
+
+# Project memory stays on the machine that made it. Briefs, decisions, phase summaries,
+# crawled content and QA runs are per-client working material, and they are what makes this
+# repo grow. The cross-project memory (index.md, knowledge/, clients/, preferences.md,
+# proposals.md, log.md) is tracked: that is the part a backup or a second machine needs.
+projects/*
+!projects/.gitkeep
+# A client's documents (brand book, tone-of-voice samples) are the same kind of material:
+# binaries, and the client's own. The profile that lists them is still tracked.
+clients/*/sources/
+.DS_Store
+
+# brain watch's heartbeat: whether a watcher is alive on THIS machine right now.
+.watch
+# The cockpit's buttons, waiting for brain watch to pick them up.
+.evolve-request
+.draft-request
+.commit-request
+.new/
+# An app's key on its way to sbx's secret store (brain watch deletes it), and how that went.
+.secret-*
+# The Studio's Apps page: the request, the one running, how it went, and what the apps repo offers.
+.apps-*
+# brain-mem's write lock.
+.brain-mem.lock
