@@ -1152,6 +1152,11 @@ console.log('apps page: the catalog brain watch writes and the requests it runs'
     const k = b.apps().find(a => a.name === 'kept')
     assert.equal(k.lock.commit, 'abc123def4567890'); assert.equal(k.changes, 1)
   })
+  it('an update\'s conflicts folder is not a second app', () => {
+    cpSync(A, join(FIX, 'system/apps/.kept.conflicts'), { recursive: true })
+    try { assert.deepEqual(b.apps().map(a => a.name).filter(n => n.includes('kept')), ['kept']) }
+    finally { rmSync(join(FIX, 'system/apps/.kept.conflicts'), { recursive: true }) }
+  })
   it('stages one change at a time, only for what is installed or offered, and Remove needs the typed name', () => {
     throws(() => b.requestApps({ verb: 'install', name: 'kept' }), /already installed/)
     throws(() => b.requestApps({ verb: 'install', name: 'nope' }), /not in the catalog/)

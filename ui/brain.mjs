@@ -120,9 +120,11 @@ const read = p => { try { return readFileSync(p, 'utf8') } catch { return null }
 
 /** system/ and every installed app (system/apps/<name>/ with an app.conf), base first —
  *  bin/brain's sys_roots, in the same order. A lookup takes the first root that has it;
- *  a name in two roots is a lint error, never an override. */
+ *  a name in two roots is a lint error, never an override. Not a dot-folder: like the
+ *  shell's glob in sys_roots, .base/ and an update's .<app>.conflicts/ (a whole app.conf in it) are
+ *  copies of an app, not apps. */
 export function sysRoots () {
-  return [SYS, ...dirs(join(SYS, 'apps')).map(n => join(SYS, 'apps', n)).filter(d => existsSync(join(d, 'app.conf')))]
+  return [SYS, ...dirs(join(SYS, 'apps')).filter(n => !n.startsWith('.')).map(n => join(SYS, 'apps', n)).filter(d => existsSync(join(d, 'app.conf')))]
 }
 const relOf = abs => abs.slice(BRAIN.length + 1)
 const appOf = abs => (relOf(abs).match(/^system\/apps\/([^/]+)\//) || [])[1] || ''
