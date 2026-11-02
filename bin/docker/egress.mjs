@@ -12,7 +12,13 @@
 //                                          allow line names that host exactly. Checked on
 //                                          the address the name resolves to, not the name.
 //   /anthropic/…  /openai/…                the engines' APIs, with the real key put in
-//                                          here: the agent only ever holds a placeholder
+//                                          here: the agent only ever holds a placeholder.
+//                                          /anthropic takes an API key, else a Claude
+//                                          subscription token (claude setup-token)
+//   /chatgpt/…  /openai-oauth/token        Codex on a ChatGPT subscription: the real tokens
+//                                          live in /oauth/openai.json (writable, so they
+//                                          can be refreshed here); Codex holds placeholders
+//                                          and its own refresh comes here
 //   /mcp/<name>/…                          an MCP server, with its header filled in from
 //                                          the secret store
 //
@@ -22,10 +28,13 @@ import { createServer, request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { connect, isIP } from 'node:net'
 import { lookup as dnsLookup } from 'node:dns'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 
 const STORE = process.env.STORE || '/store'
+const OAUTH = process.env.OAUTH_DIR || '/oauth'
+const TOKEN_URL = process.env.OPENAI_TOKEN_URL || 'https://auth.openai.com/oauth/token'
+const CODEX_CLIENT = 'app_EMoamEEZ73f0CkXaXp7hrann'   // Codex's own OAuth client id
 const read = f => { try { return readFileSync(join(STORE, f), 'utf8').trim() } catch { return '' } }
 const secret = n => /^[A-Za-z0-9:._-]+$/.test(n) ? read(join('secrets', n)) : ''
 
@@ -35,6 +44,34 @@ export function allowed (host, policy = read('policy')) {
   if (rules.some(([k, p]) => k === 'deny' && hit(p))) return false
   const allows = rules.filter(([k]) => k === 'allow')
   return !allows.length || allows.some(([, p]) => hit(p))
+}
+
+// ---- Codex on a ChatGPT subscription ------------------------------------------------
+const oauthFile = () => join(OAUTH, 'openai.json')
+export function chatgptAuth () { try { return JSON.parse(readFileSync(oauthFile(), 'utf8')) } catch { return null } }
+const claims = jwt => { try { return JSON.parse(Buffer.from(String(jwt).split('.')[1], 'base64url')) } catch { return {} } }
+let refreshing = null
+/** The real tokens, refreshed first when the access token is within five minutes of expiring
+ *  (or when forced). Written back atomically: they are the only copy. */
+export async function chatgptTokens (force = false) {
+  const a = chatgptAuth()
+  if (!a?.tokens?.refresh_token) return null
+  const exp = claims(a.tokens.access_token).exp || 0
+  if (!force && exp * 1000 > Date.now() + 300e3) return a.tokens
+  refreshing ??= (async () => {
+    const r = await fetch(TOKEN_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_id: CODEX_CLIENT, grant_type: 'refresh_token', refresh_token: a.tokens.refresh_token, scope: 'openid profile email' }) })
+    if (!r.ok) throw new Error(`refresh failed: ${r.status} — sign in again with: brain secret set openai --oauth`)
+    const t = await r.json()
+    const next = { ...a, tokens: { ...a.tokens, ...Object.fromEntries(['id_token', 'access_token', 'refresh_token'].filter(k => t[k]).map(k => [k, t[k]])) }, last_refresh: new Date().toISOString() }
+    writeFileSync(oauthFile() + '.tmp', JSON.stringify(next, null, 2), { mode: 0o600 }); renameSync(oauthFile() + '.tmp', oauthFile())
+    return next.tokens
+  })().finally(() => { refreshing = null })
+  return refreshing
+}
+/** What Codex in a sandbox holds instead: the same claims, no signature, nothing it could use elsewhere. */
+export function placeholderJwt (real) {
+  const b = o => Buffer.from(JSON.stringify(o)).toString('base64url')
+  return `${b({ alg: 'none', typ: 'JWT' })}.${b({ ...claims(real), exp: 4102444800 })}.YnJhaW4tZWdyZXNz`
 }
 
 /** Loopback, private, link-local, CGNAT, unspecified: anything that is not the internet. */
@@ -61,7 +98,11 @@ export function route (path) {
   const m = path.match(/^\/(anthropic|openai)(\/.*)?$/)
   if (m) {
     const key = secret(m[1]), rest = m[2] || '/'
-    if (m[1] === 'anthropic') return { url: 'https://api.anthropic.com' + rest, set: key ? { 'x-api-key': key } : {}, drop: key ? ['authorization'] : [] }
+    if (m[1] === 'anthropic') {
+      if (key) return { url: 'https://api.anthropic.com' + rest, set: { 'x-api-key': key }, drop: ['authorization'] }
+      const sub = secret('anthropic-oauth')
+      return { url: 'https://api.anthropic.com' + rest, set: sub ? { authorization: `Bearer ${sub}` } : {}, drop: sub ? ['x-api-key'] : [] }
+    }
     return { url: 'https://api.openai.com' + rest, set: key ? { authorization: `Bearer ${key}` } : {}, drop: [] }
   }
   const mcp = path.match(/^\/mcp\/([A-Za-z0-9][A-Za-z0-9._-]*)(\/.*)?$/)
@@ -90,8 +131,33 @@ function forward (req, res, target, set = {}, drop = [], guard = false) {
   req.pipe(out)
 }
 
+async function chatgpt (req, res) {
+  try {
+    // The auth.json a sandbox's Codex gets: the account's claims, placeholder tokens.
+    if (req.url.startsWith('/openai-oauth/placeholder')) {
+      const a = chatgptAuth()
+      if (!a?.tokens) { res.writeHead(404); return res.end('{}') }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ auth_mode: 'chatgpt', OPENAI_API_KEY: null, last_refresh: new Date().toISOString(),
+        tokens: { id_token: placeholderJwt(a.tokens.id_token), access_token: placeholderJwt(a.tokens.access_token), refresh_token: 'brain-egress', account_id: a.tokens.account_id } }))
+    }
+    if (req.url.startsWith('/openai-oauth/token')) {
+      const t = await chatgptTokens(true)
+      if (!t) { res.writeHead(401); return res.end('{"error":"not signed in: brain secret set openai --oauth"}') }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      return res.end(JSON.stringify({ id_token: placeholderJwt(t.id_token), access_token: placeholderJwt(t.access_token), refresh_token: 'brain-egress' }))
+    }
+    const t = await chatgptTokens()
+    if (!t) { res.writeHead(401); return res.end('egress: not signed in to ChatGPT — brain secret set openai --oauth\n') }
+    const set = { authorization: `Bearer ${t.access_token}` }
+    if (t.account_id) set['chatgpt-account-id'] = t.account_id
+    forward(req, res, 'https://chatgpt.com/backend-api' + req.url.replace(/^\/chatgpt/, ''), set)
+  } catch (e) { if (!res.headersSent) res.writeHead(502); res.end(`egress: ${e.message}\n`) }
+}
+
 export function server () {
   const s = createServer((req, res) => {
+    if (/^\/(chatgpt(\/|$)|openai-oauth\/(token|placeholder))/.test(req.url)) return chatgpt(req, res)
     if (req.url.startsWith('/')) {
       const r = route(req.url)
       if (!r) { res.writeHead(404); return res.end('egress: no such route\n') }

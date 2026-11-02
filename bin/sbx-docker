@@ -28,7 +28,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ST="${BRAIN_DOCKER_STORE:-$HOME/.agent-brain}"
 NODE_IMG="${BRAIN_DOCKER_NODE_IMAGE:-node:22-alpine}"
-mkdir -p "$ST/secrets" "$ST/mcp" "$ST/skills" && chmod 700 "$ST" "$ST/secrets"
+mkdir -p "$ST/secrets" "$ST/mcp" "$ST/skills" "$ST/oauth" && chmod 700 "$ST" "$ST/secrets" "$ST/oauth"
 touch "$ST/policy"
 
 die() { echo "sbx-docker: $*" >&2; exit 1; }
@@ -42,10 +42,12 @@ label() { docker inspect -f "{{index .Config.Labels \"$2\"}}" "$1" 2>/dev/null; 
 # each sandbox's network under the name brain-egress.
 egress_up() {
   docker network inspect brain-egress-out >/dev/null 2>&1 || docker network create brain-egress-out >/dev/null
+  # Recreated when it was made by an older version of this script (its label says which).
+  if exists brain-egress && [ "$(label brain-egress agent-brain.egress)" != 2 ]; then docker rm -f brain-egress >/dev/null; fi
   if ! exists brain-egress; then
-    docker run -d --name brain-egress --restart unless-stopped --network brain-egress-out \
+    docker run -d --name brain-egress --restart unless-stopped --network brain-egress-out --label agent-brain.egress=2 \
       --cap-drop ALL --security-opt no-new-privileges --read-only \
-      -v "$HERE/docker:/app:ro" -v "$ST:/store:ro" "$NODE_IMG" node /app/egress.mjs >/dev/null \
+      -v "$HERE/docker:/app:ro" -v "$ST:/store:ro" -v "$ST/oauth:/oauth" "$NODE_IMG" node /app/egress.mjs >/dev/null \
       || die "could not start the egress proxy"
   elif ! running brain-egress; then docker start brain-egress >/dev/null; fi
 }
@@ -54,12 +56,13 @@ attach_egress() { egress_up; docker network connect --alias brain-egress "$(net 
 # Each run: the agent's own config, written as the agent. The skill store, the engines
 # pointed at the proxy, onboarding and folder trust already answered (sbx does the same),
 # and the MCP servers this sandbox has.
+claude_auth() { if [ -s "$ST/secrets/anthropic" ]; then echo key; elif [ -s "$ST/secrets/anthropic-oauth" ]; then echo oauth; fi; }
+codex_auth() { if [ -s "$ST/secrets/openai" ]; then echo key; elif [ -s "$ST/oauth/openai.json" ]; then echo oauth; fi; }
 configure() { # name
-  local c ws mcp n url key=""; c="$(ctr "$1")"; ws="$(label "$c" agent-brain.workspace)"
-  [ -s "$ST/secrets/anthropic" ] && key=1
+  local c ws mcp; c="$(ctr "$1")"; ws="$(label "$c" agent-brain.workspace)"
   mcp="$(docker exec "$c" cat /home/agent/.brain-mcp 2>/dev/null | tr '\n' ' ')"
-  docker exec -u agent -i "$c" sh -s -- "$ws" "$key" "$( [ -s "$ST/secrets/openai" ] && echo 1)" "$mcp" <<'SH' >/dev/null 2>&1
-ws="$1"; akey="$2"; okey="$3"; mcp="$4"
+  docker exec -u agent -i "$c" sh -s -- "$ws" "$(claude_auth)" "$(codex_auth)" "$mcp" <<'SH' >/dev/null 2>&1
+ws="$1"; cauth="$2"; xauth="$3"; mcp="$4"
 mkdir -p ~/.claude ~/.agents ~/.codex
 for d in ~/.claude/skills ~/.agents/skills; do [ -e "$d" ] && [ ! -L "$d" ] || ln -sfn /opt/brain-skills "$d"; done
 node -e '
@@ -71,14 +74,23 @@ j.projects = j.projects || {}; j.projects[ws] = { ...(j.projects[ws] || {}), has
 j.mcpServers = Object.fromEntries(mcp.split(" ").filter(Boolean).map(n => [n, { type: "http", url: `http://brain-egress:3128/mcp/${n}` }]))
 fs.writeFileSync(H + "/.claude.json", JSON.stringify(j, null, 2))
 const s = rd(H + "/.claude/settings.json")
-if (akey) s.apiKeyHelper = "echo brain-egress"; else delete s.apiKeyHelper
+if (akey === "key") s.apiKeyHelper = "echo brain-egress"; else delete s.apiKeyHelper
 fs.writeFileSync(H + "/.claude/settings.json", JSON.stringify(s, null, 2))
-' "$ws" "$akey" "$mcp"
-# Codex ignores OPENAI_BASE_URL; this is the setting it reads (a top-level key, before any table).
-{ printf 'openai_base_url = "http://brain-egress:3128/openai/v1"\n\n[projects."%s"]\ntrust_level = "trusted"\n' "$ws"
+' "$ws" "$cauth" "$mcp"
+# Codex ignores OPENAI_BASE_URL. With an API key it reads openai_base_url; on a ChatGPT
+# subscription it talks to chatgpt.com, so a provider of our own sends that to the proxy
+# too, with the login it holds: placeholders the proxy hands out, the account's claims.
+{ if [ "$xauth" = oauth ]; then
+    printf 'model_provider = "brain"\nchatgpt_base_url = "http://brain-egress:3128/chatgpt"\n'
+  else printf 'openai_base_url = "http://brain-egress:3128/openai/v1"\n'; fi
+  printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$ws"
+  [ "$xauth" != oauth ] || printf '\n[model_providers.brain]\nname = "ChatGPT via brain-egress"\nbase_url = "http://brain-egress:3128/chatgpt/codex"\nwire_api = "responses"\nrequires_openai_auth = true\n'
   for n in $mcp; do printf '\n[mcp_servers.%s]\nurl = "http://brain-egress:3128/mcp/%s"\n' "$n" "$n"; done
 } > ~/.codex/config.toml
-[ -z "$okey" ] || [ -f ~/.codex/auth.json ] || printf 'brain-egress' | codex login --with-api-key
+case "$xauth" in
+  key) grep -q '"apikey"' ~/.codex/auth.json 2>/dev/null || printf 'brain-egress' | codex login --with-api-key ;;
+  oauth) curl -sf --noproxy '*' http://brain-egress:3128/openai-oauth/placeholder > ~/.codex/auth.json.tmp && mv ~/.codex/auth.json.tmp ~/.codex/auth.json ;;
+esac
 SH
 }
 
@@ -134,8 +146,11 @@ cmd_run() { # --name N -- args...
     codex) cmd=(codex --dangerously-bypass-approvals-and-sandbox) ;;
     *) cmd=("$agent") ;;
   esac
+  # A subscription's placeholder, and where Codex sends its refresh: both only for the agent.
+  local -a env=(-e TERM="${TERM:-xterm-256color}" -e CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://brain-egress:3128/openai-oauth/token)
+  [ "$(claude_auth)" = oauth ] && env+=(-e CLAUDE_CODE_OAUTH_TOKEN=brain-egress)
   local t=-i; [ -t 0 ] && [ -t 1 ] && t=-it
-  docker exec $t -u agent -w "$(label "$c" agent-brain.workspace)" -e TERM="${TERM:-xterm-256color}" "$c" "${cmd[@]}" "$@"
+  docker exec $t -u agent -w "$(label "$c" agent-brain.workspace)" "${env[@]}" "$c" "${cmd[@]}" "$@"
 }
 
 cmd_exec() { # N [--] cmd...
@@ -217,9 +232,43 @@ cmd_skills() {
   esac
 }
 
+# A subscription instead of an API key, signed in on this machine in a throwaway container
+# (no tool to install here). What it yields is kept where only the proxy reads it:
+#   anthropic  claude setup-token: a one-year token for Claude Pro or Max
+#   openai     codex login --device-auth: ChatGPT tokens, which the proxy keeps refreshed
+# A separate sign-in from Claude Code or Codex on the Mac itself, so neither logs the other out.
+login_image() { docker images --format '{{.Repository}}:{{.Tag}}' "brain-$1" | head -1; }
+cmd_oauth() {
+  local name="$1" img tmp v
+  [ -t 0 ] && [ -t 1 ] || die "signing in to a subscription needs a terminal"
+  case "$name" in
+    anthropic)
+      img="$(login_image claude)"; [ -n "$img" ] || die "no brain-claude image yet — run brain init first"
+      echo "Sign in with your Claude account in the browser; it prints a token at the end." >&2
+      docker run --rm -it --entrypoint claude "$img" setup-token || die "the sign-in did not finish"
+      printf 'paste the token it printed (sk-ant-oat…, not shown): ' >&2; IFS= read -rs v; echo >&2
+      [[ "$v" =~ ^sk-ant-oat[0-9A-Za-z_-]+$ ]] || die "that is not a Claude subscription token"
+      ( umask 077; printf '%s' "$v" > "$ST/secrets/anthropic-oauth" )
+      [ ! -s "$ST/secrets/anthropic" ] || echo "note: an Anthropic API key is stored too and is used first — remove $ST/secrets/anthropic to use the subscription" >&2
+      echo "signed in: Claude subscription. The proxy puts the token in; no sandbox holds it." ;;
+    openai)
+      img="$(login_image codex)"; [ -n "$img" ] || die "no brain-codex image yet — run brain init first"
+      tmp="$(mktemp -d)"; chmod 777 "$tmp"
+      echo "Open the link it shows and enter the code, with your ChatGPT account." >&2
+      docker run --rm -it -v "$tmp:/login" -e CODEX_HOME=/login --entrypoint codex "$img" login --device-auth \
+        && [ -s "$tmp/auth.json" ] || { rm -rf "$tmp"; die "the sign-in did not finish"; }
+      ( umask 077; cp "$tmp/auth.json" "$ST/oauth/openai.json.tmp" ) && mv "$ST/oauth/openai.json.tmp" "$ST/oauth/openai.json"
+      rm -rf "$tmp"
+      [ ! -s "$ST/secrets/openai" ] || echo "note: an OpenAI API key is stored too and is used first — remove $ST/secrets/openai to use the subscription" >&2
+      echo "signed in: ChatGPT subscription. The proxy keeps the tokens and refreshes them; no sandbox holds them." ;;
+    *) die "--oauth is for anthropic or openai" ;;
+  esac
+}
+
 cmd_secret() {
-  [ "${1:-}" = set ] || die "usage: secret set <name>   (the value from stdin, or asked for)"
+  [ "${1:-}" = set ] || die "usage: secret set <name> [--oauth]   (a key from stdin or asked for; --oauth signs in to a subscription)"
   local name="${2:-}" v
+  [ "${3:-}" = --oauth ] && { cmd_oauth "$name"; return; }
   [[ "$name" =~ ^[A-Za-z0-9:._-]+$ ]] || die "'$name' is not a secret name"
   if [ -t 0 ]; then printf 'value for %s (not shown): ' "$name" >&2; IFS= read -rs v; echo >&2
   else v="$(cat)"; fi

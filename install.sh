@@ -107,8 +107,8 @@ cat <<EOF
     cockpit       Docker Desktop restarts it; keep "start Docker Desktop when you sign in" on
 
   Once, before the first run:
-    brain secret set anthropic      the Claude key every sandbox uses (or sign in when
-                                    the first run asks), and  brain secret set openai  for Codex
+    brain secret set anthropic --oauth   your Claude subscription (an API key: leave out --oauth),
+    brain secret set openai --oauth      and your ChatGPT subscription for Codex
     The first run asks to let brain control Terminal — allow it.
 
   Optional: an app's keys (DataForSEO for the seo app) — Admin → Apps in the Studio.

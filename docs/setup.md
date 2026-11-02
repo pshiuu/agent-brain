@@ -90,14 +90,38 @@ set `BRAIN_SANDBOX=sbx`, `docker` or `auto` (the default: `sbx` when it is on PA
 
 Nothing else changes: `bin/sbx-docker` answers the `sbx` commands the brain uses, so
 `brain run`, `brain auto`, `brain up`, the cockpit and the apps work as they do with `sbx`.
-Keys go in with `brain secret set anthropic` (and `openai`), the same command under both.
+
+### Signing the engines in: API key or subscription
+
+The same commands under both drivers:
+
+```bash
+brain secret set anthropic           # a Claude API key
+brain secret set anthropic --oauth   # or your Claude Pro / Max subscription
+brain secret set openai              # an OpenAI API key
+brain secret set openai --oauth      # or your ChatGPT subscription, for Codex
+```
+
+Under `sbx` these are `sbx secret set … [--oauth]`: sbx signs you in on the Mac and its
+proxy keeps the token. The Docker driver does the same thing its own way, and in both the
+token never enters a sandbox:
+
+- **Claude subscription**: `claude setup-token` runs in a throwaway container — sign in in
+  the browser, paste the token it prints. It lasts a year. The proxy sends it as the bearer
+  token; Claude Code in the sandbox holds a placeholder.
+- **ChatGPT subscription**: `codex login --device-auth` runs in a throwaway container — open
+  the link, enter the code. The proxy keeps the tokens (`~/.agent-brain/oauth/`) and
+  refreshes them; Codex in the sandbox holds placeholders with your account's details, and
+  its own refresh requests come to the proxy.
+- These are sign-ins of their own, separate from Claude Code or Codex on your Mac, so
+  neither logs the other out. An API key, when one is stored, is used first.
 
 What keeps a sandbox in, without a VM of its own:
 
 | | |
 |---|---|
 | network | each sandbox is on an internal Docker network of its own — no route out, and no way to another sandbox. Its only way out is the `brain-egress` proxy (`bin/docker/egress.mjs`), which applies the `allow` / `deny` rules from `sandbox.conf` and the apps, and never connects to this Mac or its network (the cockpit, `host.docker.internal`, `10.*`, `192.168.*`…) unless an `allow` line names that host |
-| keys | stored in `~/.agent-brain/secrets/` and read only by the proxy, which puts them into requests to Anthropic, OpenAI and the apps' MCP servers. A sandbox holds a placeholder. (A Claude or ChatGPT *subscription* login is the exception, as under sbx: it is signed in inside the sandbox) |
+| keys | API keys and subscription tokens are stored in `~/.agent-brain/` and read only by the proxy, which puts them into requests to Anthropic, OpenAI (ChatGPT for a subscription) and the apps' MCP servers. A sandbox holds a placeholder |
 | privileges | every capability dropped and `no-new-privileges`, so no `sudo`: an agent cannot `apt-get install` here as it can under sbx. Put a tool it always needs into `templates/Dockerfile` |
 | Docker | there is no Docker inside. An agent's `docker compose …` becomes a request that `brain watch` runs on this Mac after `bin/docker/stack.mjs` checked it: no privileged service, no capabilities or devices, no host network or PID namespace, no bind mount, build context, env file or secret from outside the project, no Docker socket. The services share the sandbox's network, so `localhost:<port>` and service names work as before; `docker run` and the rest are refused |
 | files | the project, `system/` (read-only) and `memory/` are mounted, as under sbx; the skill store read-only |

@@ -2,15 +2,24 @@
 // may have (bin/docker/stack.mjs), and what the egress proxy lets out and puts in
 // (bin/docker/egress.mjs). bin/sbx-docker itself is exercised against a real Docker by hand.
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
 
-const store = mkdtempSync(join(tmpdir(), 'egress-'))
-process.env.STORE = store
+const store = mkdtempSync(join(tmpdir(), 'egress-')), oauth = mkdtempSync(join(tmpdir(), 'oauth-'))
+process.env.STORE = store; process.env.OAUTH_DIR = oauth
+// A stand-in for auth.openai.com's token endpoint, counting the refreshes it is asked for.
+let refreshes = 0
+const jwt = c => `x.${Buffer.from(JSON.stringify(c)).toString('base64url')}.sig`
+const tokenSrv = createServer((q, s) => { let b = ''; q.on('data', d => { b += d }).on('end', () => {
+  refreshes++; const r = JSON.parse(b)
+  s.end(JSON.stringify(r.refresh_token === 'rt-1' ? { access_token: jwt({ exp: 4102444800, n: 2 }), refresh_token: 'rt-2', id_token: jwt({ email: 'me@x', exp: 1 }) } : {}))
+}) }).listen(0)
+await new Promise(ok => tokenSrv.on('listening', ok))
+process.env.OPENAI_TOKEN_URL = `http://127.0.0.1:${tokenSrv.address().port}/oauth/token`
 const { rewrite } = await import('../bin/docker/stack.mjs')
-const { allowed, route, server, inside } = await import('../bin/docker/egress.mjs')
+const { allowed, route, server, inside, chatgptTokens, placeholderJwt } = await import('../bin/docker/egress.mjs')
 let n = 0
 const it = (name, fn) => { fn(); n++; console.log(`  ok  ${name}`) }
 
@@ -73,6 +82,30 @@ it('an MCP server gets its header filled from the store; an unknown one is no ro
   assert.equal(r.url, 'https://mcp.dataforseo.com/http'); assert.equal(r.set.authorization, 'Basic bG9naW46cHc=')
   assert.equal(route('/mcp/nope'), null); assert.equal(route('/mcp/../secrets'), null)
 })
+
+console.log('egress: subscriptions')
+it('a Claude subscription token is put in as a bearer when there is no API key; an API key wins', () => {
+  writeFileSync(join(store, 'secrets/anthropic-oauth'), 'sk-ant-oat01-real')
+  assert.equal(route('/anthropic/v1/messages').set['x-api-key'], 'sk-ant-real', 'an API key is stored too, so it wins')
+  writeFileSync(join(store, 'secrets/anthropic'), '')
+  const r = route('/anthropic/v1/messages')
+  assert.equal(r.set.authorization, 'Bearer sk-ant-oat01-real'); assert.deepEqual(r.drop, ['x-api-key'])
+})
+writeFileSync(join(oauth, 'openai.json'), JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: jwt({ exp: 1, n: 1 }), refresh_token: 'rt-1', id_token: jwt({ email: 'me@x' }), account_id: 'acct-1' } }))
+const fresh = await chatgptTokens()
+const again = await chatgptTokens()
+it('ChatGPT tokens: an expiring one is refreshed once and written back; a fresh one is not refreshed', () => {
+  assert.equal(refreshes, 1); assert.equal(fresh.refresh_token, 'rt-2'); assert.equal(fresh.account_id, 'acct-1')
+  assert.equal(again.access_token, fresh.access_token)
+  assert.equal(JSON.parse(readFileSync(join(oauth, 'openai.json'), 'utf8')).tokens.refresh_token, 'rt-2')
+})
+it('what Codex holds instead keeps the claims and no signature', () => {
+  const p = placeholderJwt(jwt({ email: 'me@x', 'https://api.openai.com/auth': { chatgpt_plan_type: 'plus' } }))
+  const c = JSON.parse(Buffer.from(p.split('.')[1], 'base64url'))
+  assert.equal(c.email, 'me@x'); assert.equal(c['https://api.openai.com/auth'].chatgpt_plan_type, 'plus')
+  assert.equal(JSON.parse(Buffer.from(p.split('.')[0], 'base64url')).alg, 'none')
+})
+tokenSrv.close()
 
 // The proxy end to end: a forward request to a denied host is refused before it leaves.
 const up = createServer((q, s) => s.end('upstream')).listen(0)

@@ -74,7 +74,8 @@ and `brain watch` on your Mac acts on it.
 - [`sbx`](https://docs.docker.com/ai/sandboxes/) on Apple silicon, for a VM per sandbox.
   Without it (on an Intel Mac, say) the sandboxes run as hardened containers behind an
   egress proxy that holds the keys: [the Docker driver](docs/setup.md#sandboxes-without-sbx-the-docker-driver)
-- A Claude key or subscription for Claude Code, an OpenAI key for Codex, or both
+- Claude Code with a Claude API key or a Pro/Max subscription, Codex with an OpenAI key or
+  a ChatGPT subscription, or both: `brain secret set anthropic|openai [--oauth]`
 - git. Node is only needed to run the cockpit outside Docker or to run its tests.
 
 ## Quickstart
@@ -82,7 +83,8 @@ and `brain watch` on your Mac acts on it.
 ```bash
 git clone https://github.com/pshiuu/agent-brain.git ~/agent-brain
 cd ~/agent-brain && ./install.sh     # safe to run again; --uninstall stops it all
-brain secret set anthropic           # and/or: brain secret set openai
+brain secret set anthropic --oauth   # your Claude subscription; without --oauth, an API key
+brain secret set openai --oauth      # your ChatGPT subscription, for Codex (optional)
 ```
 
 `install.sh` checks the prerequisites and builds the two sandbox templates. It also

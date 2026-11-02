@@ -54,8 +54,9 @@
 #   brain eval list | run <name> | score <project>
 #                                       run a playbook for real on a fixed input (an eval),
 #                                       score it and compare it with the last run
-#   brain secret set <name>             a key for the sandboxes (anthropic, openai): kept by
-#                                       sbx, or under the Docker driver by its egress proxy
+#   brain secret set <name> [--oauth]   a key for the sandboxes (anthropic, openai): kept by
+#                                       sbx, or under the Docker driver by its egress proxy;
+#                                       --oauth signs in to a Claude or ChatGPT subscription
 #   brain update [--check]              the base from upstream: git pull (a merge that keeps
 #                                       this brain's own commits), then ./install.sh again;
 #                                       --check only lists what it would bring
@@ -3114,8 +3115,8 @@ cmd_test() {
   down)        shift; cmd_down "$@" ;;
   evolve)      shift; cmd_evolve "$@" ;;
   update)      shift; cmd_update "$@" ;;
-  secret)      shift; [ "${1:-}" = set ] && [ -n "${2:-}" ] || die "usage: brain secret set <name>   (anthropic, openai, or an app's)"
-               sbx secret set "$2" ;;
+  secret)      shift; [ "${1:-}" = set ] && [ -n "${2:-}" ] || die "usage: brain secret set <name> [--oauth]   (anthropic, openai, or an app's)"
+               shift; sbx secret set "$@" ;;
   eval)        shift; cmd_eval "$@" ;;
   status)      shift; cmd_status ;;
   lint)        shift; cmd_lint ;;
