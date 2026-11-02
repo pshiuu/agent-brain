@@ -9,7 +9,7 @@ source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 REPO="$BRAIN"
 fake_brain
 # cmd_approve writes a host record through bin/run-record.sh under $BRAIN: a throwaway one.
-BRAIN="$T"; mkdir -p "$BRAIN/bin" "$BRAIN/templates"; cp "$REPO/bin/run-record.sh" "$REPO/bin/phase-contract.sh" "$BRAIN/bin/"; cp "$REPO/templates/VERSION" "$BRAIN/templates/"
+BRAIN="$T"; mkdir -p "$BRAIN/bin"; cp "$REPO/bin/run-record.sh" "$REPO/bin/phase-contract.sh" "$BRAIN/bin/"
 printf 'writer  claude  default\n' >> "$SYS/roles.conf"; printf '# Role: writer\n' > "$SYS/roles/writer.md"
 mkdir -p "$SYS/playbooks/note"
 printf 'draft  writer\ngate  human  writer\nfinish  writer\n' > "$SYS/playbooks/note/phases"
@@ -37,8 +37,9 @@ section "list — what evals there are"
 has "$(eval_list)" "short-note" "an eval in the base"
 has "$(eval_list)" "not run yet" "and that it has not run"
 no "an unknown eval" eval_dir nothing
-# The command itself runs under set -e, where the sourced functions here do not.
-has "$(BRAIN="$T" bash "$REPO/bin/brain" eval 2>&1)" "short-note" "brain eval lists it from the command line too"
+# The command runs under set -euo pipefail, the sourced functions here do not: before any run
+# there is no results.tsv, which once ended `brain eval` with no output.
+has "$( (set -euo pipefail; eval_list) 2>&1)" "not run yet" "the list survives set -e with nothing run yet"
 
 section "run — a real project, gates approved, scored"
 out="$(eval_run short-note 2>&1)"
