@@ -48,10 +48,13 @@ begin() {
   local engine="$8" model="$9" effort="${10}" mode="${11}" timeout="${12}" max_fix="${13}" template="${14}" mcp="${15}"
   local sys="$brain/system" mem="$brain/memory" dir id path name sep= digest commit=missing dirty=missing fix_round=0
   local repo="$project_dir" repo_path=missing
-  local contract="$brain/system/playbooks/$playbook/contracts/$phase" kind value
+  # Where the role and the playbook are, as the launcher resolved them: in the base or in an
+  # installed app (system/apps/<app>/). Unset, the base, which is all a test fixture has.
+  local role_md="${BRAIN_ROLE_FILE:-$sys/roles/$role.md}" pbdir="${BRAIN_PLAYBOOK_DIR:-$sys/playbooks/$playbook}"
+  local contract="$pbdir/contracts/$phase" kind value skill
   slug "$project"; slug "$phase"; slug "$role"; slug "$playbook"
   number "$timeout"; number "$max_fix"
-  [ -f "$sys/roles/$role.md" ] || { echo "missing role: $role" >&2; return 1; }
+  [ -f "$role_md" ] || { echo "missing role: $role ($role_md)" >&2; return 1; }
   contract_validate "$contract" >&2 || return 1
   mkdir -p "$brain/.runs/$project/$phase"
   dir="$(mktemp -d "$brain/.runs/$project/$phase/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXX")"
@@ -59,7 +62,7 @@ begin() {
   # Which launcher holds this attempt, written before plan.json: a record with a plan, no
   # result and a dead launcher is one nobody will finish (brain: sweep_stale).
   [ -z "${BRAIN_LAUNCHER:-}" ] || printf '%s\n' "$BRAIN_LAUNCHER" > "$dir/launcher"
-  cp "$sys/roles/$role.md" "$dir/role.md"
+  cp "$role_md" "$dir/role.md"
   if [ -f "$contract" ]; then
     cp "$contract" "$dir/contract"
     contract_validate "$dir/contract" >&2 || return 1
@@ -73,9 +76,11 @@ begin() {
   : > "$dir/inputs.nul"
   {
     printf '{"kind":"declared input inventory; not a transcript or frozen filesystem","inputs":['
-    include "$sys/roles/$role.md" role
+    include "$role_md" role
     for name in BRAIN.md roles.conf brain.conf sandbox.conf skills.list skills.lock; do include "$sys/$name" instructions/configuration; done
-    for name in phases playbook.md playbook.env; do include "$sys/playbooks/$playbook/$name" playbook; done
+    # An app's role is configured in the app's own roles.conf.
+    [ "$role_md" = "$sys/roles/$role.md" ] || include "${role_md%/roles/*}/roles.conf" instructions/configuration
+    for name in phases playbook.md playbook.env; do include "$pbdir/$name" playbook; done
     include "$contract" 'phase contract'
     if [ -f "$dir/contract" ]; then
       while read -r kind value || [ -n "$kind$value" ]; do
@@ -100,8 +105,10 @@ begin() {
       # Fingerprint available local skill files, in shell glob order. External
       # skills remain explicitly unresolved; do not substitute the host store.
       local skill_hash=missing
-      if [[ "$name" != *[!a-zA-Z0-9_-]* ]] && [ -d "$sys/skills/$name" ]; then
-        skill_hash="$(skill_files "$sys/skills/$name" "$sys/skills/$name" | sha)"
+      if [[ "$name" != *[!a-zA-Z0-9_-]* ]]; then
+        for skill in "$sys/skills/$name" "$sys"/apps/*/skills/"$name"; do
+          [ -d "$skill" ] && { skill_hash="$(skill_files "$skill" "$skill" | sha)"; break; }
+        done
       fi
       printf '"sha256":'; nullable "$skill_hash"
       printf ',"unresolved":'; if [ "$skill_hash" = missing ]; then printf true; else printf false; fi

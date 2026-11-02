@@ -1763,7 +1763,7 @@ $(playbook_preamble)
 
 ── The '$phase' section of the playbook ──
 $(phase_section "$phase")"
-  run_dir="$(printf '%s\n' "$prompt" | BRAIN_LAUNCHER=$$ bash "$BRAIN/bin/run-record.sh" begin "$BRAIN" "$PDIR" "$PWD" "$PROJECT" "$PLAYBOOK" "$phase" "$role" "$engine" "$model" "$effort" "$run_mode" "$PHASE_TIMEOUT" "$MAX_FIX_LOOPS" "$TPL_VERSION" "$(mcp_names)")" \
+  run_dir="$(printf '%s\n' "$prompt" | BRAIN_LAUNCHER=$$ BRAIN_ROLE_FILE="$(role_file "$role")" BRAIN_PLAYBOOK_DIR="$(playbook_dir "$PLAYBOOK")" bash "$BRAIN/bin/run-record.sh" begin "$BRAIN" "$PDIR" "$PWD" "$PROJECT" "$PLAYBOOK" "$phase" "$role" "$engine" "$model" "$effort" "$run_mode" "$PHASE_TIMEOUT" "$MAX_FIX_LOOPS" "$TPL_VERSION" "$(mcp_names)")" \
     || die "could not create pre-run record; agent not started"
   if ! contract_inputs "$run_dir/contract" "$PWD" "$PDIR" > "$run_dir/preflight.log"; then
     bash "$BRAIN/bin/run-record.sh" finish "$run_dir" "$PDIR" "$phase" blocked 0 \

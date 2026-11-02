@@ -373,6 +373,21 @@ sweep_stale testproj "$PDIR" > "$T/out" 2>&1
 denies "a lease from before leases named their attempt is cleared" test -f "$PDIR/phases/gate.running"
 rm -f "$PDIR/phases/two.running"; rm -rf "$BRAIN/.runs"
 
+section "run record — a role and a playbook that live in an app"
+reset; rm -rf "$BRAIN/.runs"
+A="$SYS/apps/fx"; mkdir -p "$A/roles" "$A/playbooks/appbook" "$A/skills/fx-skill"
+printf '# Role: fx-writer\nSkills: fx-skill\n' > "$A/roles/fx-writer.md"; printf 'fx-writer  claude  default\n' > "$A/roles.conf"
+printf 'one  fx-writer\n' > "$A/playbooks/appbook/phases"; printf '# Playbook: appbook\n' > "$A/playbooks/appbook/playbook.md"
+printf -- '---\nname: fx-skill\n---\n' > "$A/skills/fx-skill/SKILL.md"
+app_begin() { printf 'p\n' | BRAIN_LAUNCHER=$$ BRAIN_ROLE_FILE="$A/roles/fx-writer.md" BRAIN_PLAYBOOK_DIR="$A/playbooks/appbook" bash "$BRAIN/bin/run-record.sh" begin "$BRAIN" "$PDIR" "$T" testproj appbook one fx-writer claude default '' work 0 3 v1 ''; }
+d="$(app_begin 2>"$T/err")"
+holds "begin finds the app's role where the launcher says it is" test -f "$d/role.md"
+holds "and records the app's playbook and roles.conf as inputs" grep -q 'apps/fx/playbooks/appbook/phases' "$d/context.json"
+holds "its roles.conf too" grep -q 'apps/fx/roles.conf' "$d/context.json"
+holds "and fingerprints the app's skill" grep -q '"name":"fx-skill","scope":"declared, not observed invocation","sha256":"[0-9a-f]' "$d/context.json"
+denies "without the launcher's word, an app role is not found" bash -c "printf 'p\n' | bash '$BRAIN/bin/run-record.sh' begin '$BRAIN' '$PDIR' '$T' testproj appbook one fx-writer claude default '' work 0 3 v1 '' 2>/dev/null"
+rm -rf "$A" "$BRAIN/.runs"
+
 # ---- cmd_auto: the loop that runs unattended -------------------------------
 # cmd_run is the thing that costs money and needs a sandbox, so it is scripted here.
 # What is under test is which exit code auto returns, and whether it waits at a gate.
