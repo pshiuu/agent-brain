@@ -2255,7 +2255,11 @@ watch_install() {
 </dict></plist>
 EOF
   launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$(id -u)" "$plist" || die "launchctl could not load $plist"
+  # bootout returns before the old one is gone, and a bootstrap into the same label then
+  # fails with "5: Input/output error": wait for it to go, and try once more if it was slow.
+  local n=0; while launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 && [ "$n" -lt 20 ]; do sleep 0.5; n=$((n + 1)); done
+  launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || { sleep 2; launchctl bootstrap "gui/$(id -u)" "$plist"; } \
+    || die "launchctl could not load $plist"
   info "brain watch now starts at login and restarts if it dies — log: $BRAIN/.runs/watch.log"
   info "the first run it starts may ask you to allow it to control Terminal; say yes once"
 }
