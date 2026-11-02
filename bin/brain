@@ -2563,7 +2563,8 @@ put_file() { # src dest -> dest becomes src, or stays absent when src is
 merge_trees() { # base ours theirs out -> out = ours and theirs merged against base. Prints
   # "conflict <path>" for each file both changed in ways that do not merge (out keeps ours
   # with git's conflict markers). Non-zero on any conflict. ONLY_FILES (newline list), when
-  # set, limits theirs to those paths: everything else is ours.
+  # set, limits theirs to those paths: everything else is ours. SETTLED, when set, is an
+  # earlier merge of the same two sides: a file there with its markers gone is taken as-is.
   local B="$1" O="$2" T="$3" X="$4" f bad=0
   rm -rf "$X"; mkdir -p "$X"
   while IFS= read -r f; do
@@ -2573,7 +2574,9 @@ merge_trees() { # base ours theirs out -> out = ours and theirs merged against b
     elif same_file "$O/$f" "$B/$f"; then put_file "$T/$f" "$X/$f"
     elif [ -f "$B/$f" ] && [ -f "$O/$f" ] && [ -f "$T/$f" ]; then
       put_file "$O/$f" "$X/$f"
-      git merge-file -q -L local -L base -L upstream "$X/$f" "$B/$f" "$T/$f" || { echo "conflict $f"; bad=1; }
+      git merge-file -q -L local -L base -L upstream "$X/$f" "$B/$f" "$T/$f" && continue
+      if [ -n "${SETTLED:-}" ] && [ -f "$SETTLED/$f" ] && ! grep -q '^<<<<<<< local' "$SETTLED/$f"
+      then put_file "$SETTLED/$f" "$X/$f"; else echo "conflict $f"; bad=1; fi
     else
       # Added on both sides differently, or deleted on one side and changed on the other.
       put_file "$O/$f" "$X/$f"; echo "conflict $f"; bad=1
@@ -2682,7 +2685,7 @@ apps_do() { # verb name flags -> runs in apps_request's command substitution, so
 app_has_skills() { compgen -G "$SYS/apps/$1/skills/*/" >/dev/null || [ -f "$SYS/apps/$1/skills.list" ]; }
 
 app_install() { # name [--from <git-url|owner/repo|dir> [path]] — install, or update when installed
-  local name="${1:-}" src path commit new merged out busy conflicts base had=""
+  local name="${1:-}" src path commit new merged out busy conflicts base had="" settled
   [ -n "$name" ] || die "usage: brain app install <name> [--from <git-url|owner/repo|dir> [path]]"
   [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "'$name' is not a usable app name"
   shift; src="$(setting APPS_SOURCE pshiuu/agent-brain-apps)"; path="$name"
@@ -2702,12 +2705,17 @@ app_install() { # name [--from <git-url|owner/repo|dir> [path]] — install, or 
   mkdir -p "$SYS/apps"; new="$SYS/apps/.$name.new"; merged="$SYS/apps/.$name.merged"
   commit="$(app_fetch "$name" "$src" "$path" "$new")" || exit 1
   if [ -n "$had" ]; then
-    rm -rf "$SYS/apps/.$name.conflicts"
-    if ! conflicts="$(merge_trees "$base" "$SYS/apps/$name" "$new" "$merged")"; then
-      mv "$merged" "$SYS/apps/.$name.conflicts"; rm -rf "$new"
+    # A conflicts folder from this same new commit is the human's merge so far: what they
+    # settled there stands. One from an older commit would drop what upstream changed since.
+    settled="$SYS/apps/.$name.conflicts"
+    [ "$(cat "$settled/.against" 2>/dev/null)" = "$commit" ] || settled=""
+    conflicts="$(SETTLED="$settled" merge_trees "$base" "$SYS/apps/$name" "$new" "$merged")" || {
+      rm -rf "$SYS/apps/.$name.conflicts"; mv "$merged" "$SYS/apps/.$name.conflicts"; rm -rf "$new"
+      echo "$commit" > "$SYS/apps/.$name.conflicts/.against"
       printf '%s\n' "$conflicts" | sed 's/^conflict /  ✗ /'
-      die "'$name' was not updated: this brain and the new version both changed those files. The merge, with git's markers, is in system/apps/.$name.conflicts/ — settle them in the app (or brain app revert $name <file>), then update again"
-    fi
+      die "'$name' was not updated: this brain and the new version both changed those files. The merge, with git's markers, is in system/apps/.$name.conflicts/ — settle each file there (keep what you want, remove the markers) or brain app revert $name <file>, then update again"
+    }
+    rm -rf "$SYS/apps/.$name.conflicts"
   else cp -R "$new" "$merged"; fi
   out="$(EXTRA_ROOT="$merged" SKIP_APP="$name" app_check "$merged" "$name")" || {
     echo "$out" | sed 's/^err  */  ✗ /; s/^note */  · /'; rm -rf "$new" "$merged"; die "'$name' was not installed: it does not pass brain app check"; }

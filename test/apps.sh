@@ -82,6 +82,10 @@ before="$(cat "$SYS/apps/seo/notes.md")"
 no "the same line changed on both sides stops the update" app_install seo
 is "$(cat "$SYS/apps/seo/notes.md")" "$before" "and the installed app is untouched"
 has "$(cat "$SYS/apps/.seo.conflicts/notes.md" 2>&1)" "<<<<<<< local" "the merge with markers is left to look at"
+printf 'two, settled\n' > "$SYS/apps/.seo.conflicts/notes.md"
+app_install seo >/dev/null 2>&1
+is "$(cat "$SYS/apps/seo/notes.md")" "two, settled" "the next update takes the file as it was settled in the conflicts folder"
+no "and the conflicts folder is gone once it went through" test -d "$SYS/apps/.seo.conflicts"
 app_revert seo notes.md >/dev/null 2>&1
 app_install seo >/dev/null 2>&1
 has "$(cat "$SYS/apps/seo/notes.md")" "two (there)" "after revert the update goes through"
