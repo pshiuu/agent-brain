@@ -64,6 +64,8 @@ brain lint                         # the memory wiki, and names defined twice ac
 brain playbook check <name>        # every playbook's own rules
 brain app check <name>; brain app test   # every installed app
 ```
+Evals (`brain eval run <name>`) run agents for real and cost model money: by hand, in
+agent-brain-main, never inside `brain test`.
 Two repos: the base (this one) and `memory/`, a repo of its own that the base ignores.
 `commit_memory` commits only the memory repo; `system/` is not auto-committed, so changes
 there are committed by hand in the base, which is also the only undo. `brain update`

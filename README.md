@@ -321,6 +321,27 @@ a copy of the base without anything git ignores, which is exactly what someone w
 gets. The suites refuse to run git on the brain they run from, so a test can never commit
 into a real brain. Use `./bin/brain` there: `brain` on your PATH is the local brain.
 
+### Evals: does a playbook still produce good work?
+
+The test suites prove the machinery; an eval proves the agents. It runs a playbook for real
+on a fixed input, approves its human gates as they come, and scores what came out:
+
+```bash
+brain eval                        # the evals here, and how each one last went
+brain eval run seo-article        # a real project, unattended — model money and time
+brain eval score <project>        # score a run again, e.g. one you finished by hand
+```
+
+An eval is a folder `evals/<name>/` in the base or an app: `eval.conf` names the playbook,
+`brief.md` is the project's whole brief, `sources/` the files it cites, and `check.sh` the
+rubric, one `pass <what>` or `fail <what>` line per check (the seo app's runs its article
+checks one by one and `brain-mem check` after the retro). The report goes to
+`memory/evals/<name>/<project>.md`: the scorecard per phase (agent runs, minutes, FAIL
+rounds, findings let through), the checks, and the totals next to the last run's, which
+`results.tsv` keeps one line per run with the base and app commits it ran on. Run evals in
+`agent-brain-main`, never in the brain you work in: each run is a real project whose retro
+writes to that brain's memory. They are never part of `brain test`.
+
 ### How a lesson gets back into the system
 
 `retro` writes what a project taught into `knowledge/`, and anything that should change

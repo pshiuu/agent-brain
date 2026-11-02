@@ -51,6 +51,9 @@
 #                                       the only command that may write system/: applies
 #                                       memory/proposals.md to the roles and playbooks,
 #                                       or whatever you name. Review with git diff
+#   brain eval list | run <name> | score <project>
+#                                       run a playbook for real on a fixed input (an eval),
+#                                       score it and compare it with the last run
 #   brain update                        the base from upstream: git pull (a merge that keeps
 #                                       this brain's own commits), then ./install.sh again
 #   brain status                        show phase progress for this project
@@ -74,7 +77,7 @@
 #   brain sync-sandbox                  register the MCP servers and network rules of
 #                                       system/sandbox.conf and the installed apps' app.conf
 #
-# init, update, playbooks, playbook, role, evolve and lint run anywhere; the rest read
+# init, update, eval, playbooks, playbook, role, evolve and lint run anywhere; the rest read
 # the project's project.env and must run from inside the project folder.
 set -euo pipefail
 
@@ -1952,6 +1955,8 @@ cmd_auto() {
     [ "$rc" -eq 3 ] && { notify "brain: $PROJECT timed out on '$before'"; return 3; }
 
     if [ "$RUN_STATUS" = "gate" ]; then
+      # An eval judges the work itself, so its gates pass as they come (brain eval run).
+      if [ -n "${BRAIN_EVAL:-}" ]; then cmd_approve "$before" >/dev/null; info "eval: '$before' approved by the runner"; continue; fi
       info "waiting for your verdict on '$before' — approve it here, or in the cockpit. Ctrl-C stops the run."
       # Waiting, it holds no phase lease, so brain watch could not see it and opened a
       # second `brain auto` for the cockpit's "then start": two launchers raced into the
@@ -2484,6 +2489,15 @@ app_check() { # dir [name] -> "err|note <problem>" lines; non-zero when any err
     n="$(app_lines mcp | awk -v r="$r" -v me="$name" -v skip="${SKIP_APP:-}" '$2 == r && $1 != me && $1 != skip { print $1; exit }')"
     [ -z "$n" ] || { echo "err  mcp server '$r' is already the app '$n''s"; bad=1; }
   done
+  # Evals: each runs one of this app's playbooks (or another root's) on a brief of its own.
+  for r in "$d"/evals/*/; do
+    [ -d "$r" ] || continue; n="$(basename "$r")"
+    pb="$(awk '$1 == "playbook" { print $2; exit }' "$r/eval.conf" 2>/dev/null)"
+    [ -n "$pb" ] || { echo "err  evals/$n: eval.conf needs a 'playbook <name>' line"; bad=1; }
+    [ -z "$pb" ] || [ -d "$d/playbooks/$pb" ] || [ -d "$(playbook_dir "$pb")" ] || { echo "err  evals/$n runs playbook '$pb', which neither this app nor the brain has"; bad=1; }
+    [ -f "$r/brief.md" ] || { echo "err  evals/$n has no brief.md, the fixed input it runs on"; bad=1; }
+    [ ! -f "$r/check.sh" ] || bash -n "$r/check.sh" 2>/dev/null || { echo "err  evals/$n/check.sh does not parse"; bad=1; }
+  done
   # Starter knowledge: pages an agent opens by name, so each is one named topic with a title.
   for r in "$d"/knowledge/*; do
     [ -e "$r" ] || continue; n="$(basename "$r")"
@@ -2866,6 +2880,102 @@ cmd_app() {
   esac
 }
 
+# ---------- evals ------------------------------------------------------------
+# An eval runs a playbook for real on a fixed input and scores what the agents made: the
+# test layer that costs model money, so it runs when asked and never inside brain test.
+# It is a folder evals/<name>/ in the base or an app:
+#   eval.conf   "playbook <name>": the playbook it runs
+#   brief.md    the project's whole brief, every input under its "## <label>"
+#   sources/    optional: files the brief cites as "- sources/<file>"
+#   check.sh    optional: the rubric. Run on the host after the run with PDIR (project
+#               memory), PROJECT_DIR (its code folder), BRAIN_SYSTEM and BRAIN_MEMORY set;
+#               prints one "pass <what>" or "fail <what>" line per check
+# Its human gates are approved as they come: the eval is what judges the work. Each run is
+# a real project, so its retro writes to this brain's memory — run evals in a brain whose
+# memory is for trying things (agent-brain-main), not in the one you work in. Results land
+# in memory/evals/<name>/: a report per run and results.tsv, one line per run, which the
+# next run is compared with.
+eval_dir() { in_roots "evals/$1" || die "no eval '$1' (evals here: $(all_in evals | tr '\n' ' '))"; }
+eval_field() { awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$2" 2>/dev/null; }
+
+eval_list() {
+  local n d last
+  for n in $(all_in evals); do
+    d="$(in_roots "evals/$n")"
+    last="$(tail -n +2 "$MEM/evals/$n/results.tsv" 2>/dev/null | tail -1 \
+      | awk -F'\t' '{ printf "last %s: %s phases, %s runs, %s min, %s FAIL rounds, checks %s/%s", $1, $4, $5, $6, $7, $8, $9 }')"
+    printf '  %-24s %-18s %s\n' "$n" "$(awk '$1 == "playbook" { print $2; exit }' "$d/eval.conf")" "${last:-not run yet}"
+  done
+}
+
+eval_run() { # name
+  local name="${1:-}" d pb project dir pdir rc=0 e
+  [ -n "$name" ] || die "usage: brain eval run <name>"
+  d="$(eval_dir "$name")"
+  pb="$(awk '$1 == "playbook" { print $2; exit }' "$d/eval.conf" 2>/dev/null)"
+  [ -n "$pb" ] && [ -d "$(playbook_dir "$pb")" ] || die "eval '$name' runs playbook '$pb', which is not installed here"
+  [ -f "$d/brief.md" ] || die "eval '$name' has no brief.md"
+  project="eval-$name-$(date +%m%d-%H%M%S)"; dir="$DEV/$project"; pdir="$MEM/projects/$project"
+  BRAIN_NONINTERACTIVE=1 cmd_new "$pb" "$project" --dir "$dir" >/dev/null
+  cp "$d/brief.md" "$pdir/brief.md"
+  [ -d "$d/sources" ] && cp -R "$d/sources/." "$pdir/sources/"
+  printf 'EVAL=%s\n' "$name" >> "$pdir/project.env"
+  info "eval '$name': project $project runs $pb unattended, its human gates approved as they come"
+  ( cd "$dir" && BRAIN_EVAL=1 cmd_auto ) || rc=$?
+  eval_score "$project" "$rc"
+  # Its sandboxes were for this run alone; the project's record and code folder stay.
+  for e in claude codex; do sandbox_exists "$project-$e" && { sbx rm --force "$project-$e" >/dev/null 2>&1 || true; }; done
+  return 0
+}
+
+eval_score() { # project [brain auto's exit code] -> the report, and a results.tsv line
+  local project="${1:-}" rc="${2:--}" pdir name pb d card checks="" pass=0 total=0 runs mins fails done_n all_n prev out app brainv appv e
+  [ -n "$project" ] || die "usage: brain eval score <project>"
+  pdir="$MEM/projects/$project"
+  name="$(eval_field EVAL "$pdir/project.env")"; [ -n "$name" ] || die "'$project' is not an eval run"
+  pb="$(eval_field PLAYBOOK "$pdir/project.env")"; d="$(eval_dir "$name")"
+  card="$(scorecard "$project" "$pb")"
+  read -r runs mins fails < <(printf '%s\n' "$card" | awk -F'|' 'NR > 3 { r += $4; m += $5; f += $6 } END { printf "%d %d %d\n", r, m, f }')
+  all_n="$(awk '$1 !~ /^#/ && NF >= 2' "$(playbook_dir "$pb")/phases" | wc -l | tr -d ' ')"
+  done_n=0; for e in "$pdir"/phases/*.done; do [ -e "$e" ] && done_n=$((done_n + 1)); done
+  if [ -f "$d/check.sh" ]; then
+    checks="$(PDIR="$pdir" PROJECT_DIR="$(eval_field PROJECT_DIR "$pdir/project.env")" BRAIN_SYSTEM="$SYS" BRAIN_MEMORY="$MEM" bash "$d/check.sh" 2>&1 || true)"
+    pass="$(printf '%s\n' "$checks" | grep -c '^pass ' || true)"; total="$(printf '%s\n' "$checks" | grep -cE '^(pass|fail) ' || true)"
+  fi
+  app=""; case "$d" in "$SYS"/apps/*) app="${d#"$SYS"/apps/}"; app="${app%%/*}" ;; esac
+  brainv="$(git -C "$BRAIN" rev-parse --short HEAD 2>/dev/null || echo -)"
+  appv="$( [ -n "$app" ] && awk -v n="$app" '$1 == n { print substr($3, 1, 7) }' "$SYS/apps.lock" 2>/dev/null)"
+  out="$MEM/evals/$name"; mkdir -p "$out"
+  [ -f "$out/results.tsv" ] || printf 'date\tproject\tauto exit\tphases done\tagent runs\tminutes\tFAIL rounds\tchecks passed\tchecks\tbase\tapp\n' > "$out/results.tsv"
+  prev="$(tail -n +2 "$out/results.tsv" | awk -F'\t' -v p="$project" '$2 != p' | tail -1)"
+  printf '%s\t%s\t%s\t%s/%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date '+%F %H:%M')" "$project" "$rc" "$done_n" "$all_n" "$runs" "$mins" "$fails" "$pass" "$total" "$brainv" "${appv:--}" >> "$out/results.tsv"
+  {
+    echo "# Eval $name: $project"
+    echo
+    echo "Playbook $pb, base $brainv${app:+, app $app ${appv:--}}. brain auto exit: $rc (0 complete, 2 a phase came back not done, 3 a ceiling)."
+    echo "Phases done $done_n of $all_n · agent runs $runs · minutes $mins · FAIL rounds $fails · checks passed $pass of $total."
+    if [ -n "$prev" ]; then
+      printf '%s\n' "$prev" | awk -F'\t' -v r="$runs" -v m="$mins" -v f="$fails" -v p="$pass" -v t="$total" -v dn="$done_n/$all_n" \
+        '{ printf "Last run (%s, %s): phases %s -> %s · runs %s -> %s · minutes %s -> %s · FAIL rounds %s -> %s · checks %s/%s -> %s/%s.\n", $2, $1, $4, dn, $5, r, $6, m, $7, f, $8, $9, p, t }'
+    else echo "First run of this eval: nothing to compare with yet."; fi
+    echo; echo "## Scorecard"; printf '%s\n' "$card" | tail -n +2
+    if [ -n "$checks" ]; then echo; echo "## Checks"; printf '%s\n' "$checks" | sed 's/^/- /'; fi
+  } > "$out/$project.md"
+  cat "$out/$project.md"
+  commit_memory "eval $name $project"
+  info "report: $out/$project.md"
+}
+
+cmd_eval() {
+  local verb="${1:-list}"; [ $# -gt 0 ] && shift
+  case "$verb" in
+    list)  eval_list ;;
+    run)   eval_run "$@" ;;
+    score) eval_score "$@" ;;
+    *) die "usage: brain eval list | run <name> | score <project>" ;;
+  esac
+}
+
 # `brain update`: the base from upstream. This folder is a checkout of the base. Its own
 # settings (brain.local.conf, apps.lock, skills.lock, config/) are files git ignores, so they
 # never travel; what evolve taught it is commits of its own, so an update is a merge that
@@ -2937,6 +3047,7 @@ cmd_test() {
   down)        shift; cmd_down "$@" ;;
   evolve)      shift; cmd_evolve "$@" ;;
   update)      shift; cmd_update ;;
+  eval)        shift; cmd_eval "$@" ;;
   status)      shift; cmd_status ;;
   lint)        shift; cmd_lint ;;
   approve)     shift; cmd_approve "$@" ;;

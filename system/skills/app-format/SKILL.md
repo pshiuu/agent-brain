@@ -31,6 +31,9 @@ seo/
   knowledge/*.md    starter knowledge: one topic per page, '# <title>' first. Read-only;
                     every project whose scope names the app reads it, an update replaces it.
                     What projects learn goes into memory/knowledge/, never here
+  evals/<name>/     a playbook run for real on a fixed input (brain eval run <name>):
+                    eval.conf ("playbook <name>"), brief.md (the whole brief), optional
+                    sources/ and check.sh (the rubric: "pass|fail <what>" lines)
   test/*.sh         its own tests; `brain app test <name>` runs them (source test/lib.sh)
   cli.sh            optional host commands: `brain <name> <verb>` (below)
   ui/main.js        optional code for the Studio — installing it asks for trust
