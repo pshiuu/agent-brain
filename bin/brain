@@ -2907,7 +2907,7 @@ eval_list() {
   for n in $(all_in evals); do
     d="$(in_roots "evals/$n")"
     last="$(tail -n +2 "$MEM/evals/$n/results.tsv" 2>/dev/null | tail -1 \
-      | awk -F'\t' '{ printf "last %s: %s phases, %s runs, %s min, %s FAIL rounds, checks %s/%s", $1, $4, $5, $6, $7, $8, $9 }')"
+      | awk -F'\t' '{ printf "last %s: %s phases, %s runs, %s min, %s FAIL rounds, checks %s/%s", $1, $4, $5, $6, $7, $8, $9 }' || true)"
     printf '  %-24s %-18s %s\n' "$n" "$(awk '$1 == "playbook" { print $2; exit }' "$d/eval.conf")" "${last:-not run yet}"
   done
 }
@@ -2948,7 +2948,7 @@ eval_score() { # project [brain auto's exit code] -> the report, and a results.t
   fi
   app=""; case "$d" in "$SYS"/apps/*) app="${d#"$SYS"/apps/}"; app="${app%%/*}" ;; esac
   brainv="$(git -C "$BRAIN" rev-parse --short HEAD 2>/dev/null || echo -)"
-  appv="$( [ -n "$app" ] && awk -v n="$app" '$1 == n { print substr($3, 1, 7) }' "$SYS/apps.lock" 2>/dev/null)"
+  appv="$( [ -z "$app" ] || awk -v n="$app" '$1 == n { print substr($3, 1, 7) }' "$SYS/apps.lock" 2>/dev/null || true)"
   out="$MEM/evals/$name"; mkdir -p "$out"
   [ -f "$out/results.tsv" ] || printf 'date\tproject\tauto exit\tphases done\tagent runs\tminutes\tFAIL rounds\tchecks passed\tchecks\tbase\tapp\n' > "$out/results.tsv"
   prev="$(tail -n +2 "$out/results.tsv" | awk -F'\t' -v p="$project" '$2 != p' | tail -1)"

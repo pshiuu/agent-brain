@@ -37,6 +37,8 @@ section "list — what evals there are"
 has "$(eval_list)" "short-note" "an eval in the base"
 has "$(eval_list)" "not run yet" "and that it has not run"
 no "an unknown eval" eval_dir nothing
+# The command itself runs under set -e, where the sourced functions here do not.
+has "$(BRAIN="$T" bash "$REPO/bin/brain" eval 2>&1)" "short-note" "brain eval lists it from the command line too"
 
 section "run — a real project, gates approved, scored"
 out="$(eval_run short-note 2>&1)"
