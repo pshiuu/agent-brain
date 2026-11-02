@@ -12,7 +12,8 @@ project compiles what it learned into a wiki the next project reads.
 Two ideas hold it together.
 
 **The sandbox is the permission boundary.** Every phase runs in a
-[Docker Sandbox](https://docs.docker.com/ai/sandboxes/) (`sbx`) with only the project
+[Docker Sandbox](https://docs.docker.com/ai/sandboxes/) (`sbx`, a VM each), or where
+that does not run, a hardened container behind an egress proxy, with only the project
 mounted. Inside it the agent works at full permission, with no approval prompt per file
 write or command, and it can reach nothing else on your machine. MCP servers, network
 rules and skills are declared once and apply to every sandbox.
@@ -68,9 +69,11 @@ and `brain watch` on your Mac acts on it.
 
 ## Requirements
 
-- macOS (the watcher is a launchd login item; runs open in Terminal)
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) and
-  [`sbx`](https://docs.docker.com/ai/sandboxes/), signed in with `sbx login`
+- macOS, Apple silicon or Intel (the watcher is a launchd login item; runs open in Terminal)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- [`sbx`](https://docs.docker.com/ai/sandboxes/) on Apple silicon, for a VM per sandbox.
+  Without it (on an Intel Mac, say) the sandboxes run as hardened containers behind an
+  egress proxy that holds the keys: [the Docker driver](docs/setup.md#sandboxes-without-sbx-the-docker-driver)
 - A Claude key or subscription for Claude Code, an OpenAI key for Codex, or both
 - git. Node is only needed to run the cockpit outside Docker or to run its tests.
 
@@ -79,7 +82,7 @@ and `brain watch` on your Mac acts on it.
 ```bash
 git clone https://github.com/pshiuu/agent-brain.git ~/agent-brain
 cd ~/agent-brain && ./install.sh     # safe to run again; --uninstall stops it all
-sbx secret set anthropic             # and/or: sbx secret set openai
+brain secret set anthropic           # and/or: brain secret set openai
 ```
 
 `install.sh` checks the prerequisites and builds the two sandbox templates. It also
@@ -146,7 +149,7 @@ examples/memory/   what a new brain's memory starts from
 
 | | |
 |---|---|
-| [Setup](docs/setup.md) | install, skills, MCP servers and network rules, templates, disk space |
+| [Setup](docs/setup.md) | install, skills, MCP servers and network rules, sandboxes without sbx, templates, disk space |
 | [Commands](docs/commands.md) | daily use, and every command with its flags |
 | [Playbooks and roles](docs/playbooks.md) | writing them, review loops, human gates, phase contracts |
 | [Running phases](docs/running.md) | dev servers, the two engines, how a role reaches the agent, running unattended |

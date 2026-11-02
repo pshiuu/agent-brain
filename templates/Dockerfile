@@ -14,7 +14,7 @@ RUN npx -y playwright@${PLAYWRIGHT_VERSION} install-deps chromium \
  && apt-get install -y --no-install-recommends jq ripgrep \
  && rm -rf /var/lib/apt/lists/*
 COPY bin/ /usr/local/bin/
-RUN chmod +x /usr/local/bin/brain-*
+RUN chmod +x /usr/local/bin/brain-* /usr/local/bin/docker
 
 # --- user tools (agent) --------------------------------------------------
 USER agent

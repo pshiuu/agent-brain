@@ -23,6 +23,11 @@ at this level or above.
   `BRAIN_MAX_PARALLEL` runs at once. A new kind of button means a new request file and a new `case` in `cmd_watch`,
   never a shell in the container. The install of a draft is the one place the cockpit
   writes `system/` itself, and it asks the host to commit right after.
+- **Every sandbox goes through `sbx`.** Under `BRAIN_SANDBOX=docker`, `sbx` is a function that
+  calls `bin/sbx-docker`, which answers the same commands on plain Docker. A new `sbx …` call
+  in the launcher needs its answer there too. Its trust decisions live in `bin/docker/`:
+  `egress.mjs` (the only way out, and the only holder of keys) and `stack.mjs` (what an
+  agent's `docker compose` may start); `node test/docker.mjs` is their test.
 - **The stack is per project.** It lives in each project's `brief.md` under `## Stack`,
   never in `memory/preferences.md` and never assumed from the repo you happen to see.
 - **Roles are two halves that must agree**: a line in a `roles.conf` and `roles/<name>.md`

@@ -37,11 +37,15 @@ if ! docker info >/dev/null 2>&1; then
   for _ in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 2; done
   docker info >/dev/null 2>&1 || stop "Docker Desktop did not come up. Start it, then run ./install.sh again."
 fi
+# Sandboxes: sbx (a VM each) where it runs, plain Docker where it does not. sbx needs Apple
+# silicon; on an Intel Mac, or when you would rather not install it, bin/sbx-docker runs the
+# same sandboxes as hardened containers behind an egress proxy (docs/setup.md).
 if ! command -v sbx >/dev/null; then
-  if command -v brew >/dev/null && ask "sbx (Docker Sandboxes) is missing. Install it with Homebrew now?"; then
+  if [ "$(uname -m)" = arm64 ] && command -v brew >/dev/null \
+     && ask "sbx (Docker Sandboxes, a VM per sandbox) is missing. Install it with Homebrew now? (no: use plain Docker)"; then
     brew install --cask sbx
   else
-    stop "sbx (Docker Sandboxes) is missing. Install it with: brew install --cask sbx — then run ./install.sh again."
+    say "sandboxes run on plain Docker (BRAIN_SANDBOX=docker)$([ "$(uname -m)" = arm64 ] || echo ': sbx does not run on an Intel Mac')"
   fi
 fi
 
@@ -72,7 +76,7 @@ EOF
 
 # ---- the engine on the Mac ----------------------------------------------------------
 say "sandbox templates, skills and sandbox rules (the first time takes a few minutes)"
-say "if sbx asks you to sign in: run  sbx login  and then ./install.sh again"
+command -v sbx >/dev/null && say "if sbx asks you to sign in: run  sbx login  and then ./install.sh again"
 brain init
 brain watch install
 
@@ -103,8 +107,8 @@ cat <<EOF
     cockpit       Docker Desktop restarts it; keep "start Docker Desktop when you sign in" on
 
   Once, before the first run:
-    sbx secret set anthropic        the Claude key every sandbox uses (or sign in when
-                                    the first run asks), and  sbx secret set openai  for Codex
+    brain secret set anthropic      the Claude key every sandbox uses (or sign in when
+                                    the first run asks), and  brain secret set openai  for Codex
     The first run asks to let brain control Terminal — allow it.
 
   Optional: an app's keys (DataForSEO for the seo app) — Admin → Apps in the Studio.

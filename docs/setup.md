@@ -1,6 +1,6 @@
 # Setup
 
-Installing a brain on a Mac, what it puts where, and the upkeep: templates and disk space.
+Installing a brain on a Mac, what it puts where, sandboxes with or without sbx, and the upkeep: templates and disk space.
 
 ## Installing
 
@@ -78,6 +78,44 @@ existing sandboxes only via `sbx mcp load <name> --sandbox <sandbox>` (or by
 deleting the sandbox and letting `brain run` rebuild it). Policy rules apply to
 all sandboxes immediately and are idempotent — re-syncing changes nothing.
 Check with `sbx mcp ls` and `sbx policy ls --wide`.
+
+## Sandboxes without sbx: the Docker driver
+
+`sbx` gives every sandbox a VM with its own kernel, and it is what the brain uses wherever
+it is installed. It needs Apple silicon (or Windows 11 x64, or Linux with KVM), so on an
+**Intel Mac** — or when you would rather not install it — the brain runs the same sandboxes
+on plain Docker. `install.sh` picks this on its own when `sbx` is missing; to choose,
+set `BRAIN_SANDBOX=sbx`, `docker` or `auto` (the default: `sbx` when it is on PATH) in
+`system/brain.local.conf`.
+
+Nothing else changes: `bin/sbx-docker` answers the `sbx` commands the brain uses, so
+`brain run`, `brain auto`, `brain up`, the cockpit and the apps work as they do with `sbx`.
+Keys go in with `brain secret set anthropic` (and `openai`), the same command under both.
+
+What keeps a sandbox in, without a VM of its own:
+
+| | |
+|---|---|
+| network | each sandbox is on an internal Docker network of its own — no route out, and no way to another sandbox. Its only way out is the `brain-egress` proxy (`bin/docker/egress.mjs`), which applies the `allow` / `deny` rules from `sandbox.conf` and the apps, and never connects to this Mac or its network (the cockpit, `host.docker.internal`, `10.*`, `192.168.*`…) unless an `allow` line names that host |
+| keys | stored in `~/.agent-brain/secrets/` and read only by the proxy, which puts them into requests to Anthropic, OpenAI and the apps' MCP servers. A sandbox holds a placeholder. (A Claude or ChatGPT *subscription* login is the exception, as under sbx: it is signed in inside the sandbox) |
+| privileges | every capability dropped and `no-new-privileges`, so no `sudo`: an agent cannot `apt-get install` here as it can under sbx. Put a tool it always needs into `templates/Dockerfile` |
+| Docker | there is no Docker inside. An agent's `docker compose …` becomes a request that `brain watch` runs on this Mac after `bin/docker/stack.mjs` checked it: no privileged service, no capabilities or devices, no host network or PID namespace, no bind mount, build context, env file or secret from outside the project, no Docker socket. The services share the sandbox's network, so `localhost:<port>` and service names work as before; `docker run` and the rest are refused |
+| files | the project, `system/` (read-only) and `memory/` are mounted, as under sbx; the skill store read-only |
+
+What it does not have is a kernel of its own per sandbox: Docker Desktop puts one VM
+between all the sandboxes and the Mac, not one between each sandbox and the next. On a Linux
+server, run them under gVisor (`BRAIN_DOCKER_RUNTIME=runsc`) to get that boundary back.
+
+Things to know:
+
+- `brain watch` must be running for an agent's `docker compose` (it is a login item after
+  `install.sh`). Without it the command waits 30 seconds and says so.
+- A stack's own containers have no internet; Docker pulls and builds their images on the
+  Mac. Give Docker Desktop enough memory (Settings → Resources), since every sandbox and
+  its stack share that VM.
+- The store (`~/.agent-brain`: secrets, MCP servers, policy, skills) is per user, like
+  sbx's, and shared by every brain on the Mac.
+- `node test/docker.mjs` checks the stack rules and the proxy without Docker.
 
 ## Updating the template
 

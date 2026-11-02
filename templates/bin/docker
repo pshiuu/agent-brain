@@ -1,0 +1,24 @@
+#!/bin/bash
+# `docker` inside a sandbox. Under sbx the sandbox has a Docker of its own: this is the
+# real one. Under the Docker driver it has none, so `docker compose …` becomes a request
+# the host runs once it has checked the stack (bin/sbx-docker stack-tick, from brain
+# watch), and its output streams back here. Anything other than compose is refused.
+[ "${BRAIN_SANDBOX_DRIVER:-sbx}" = docker ] || exec /usr/bin/docker "$@"
+if [ "${1:-}" != compose ]; then
+  echo "docker: only 'docker compose …' works in this sandbox — the brain runs it on the host, after checking the stack" >&2
+  exit 1
+fi
+shift
+[ -n "${BRAIN_PROJECT:-}" ] && [ -n "${BRAIN_MEMORY:-}" ] || { echo "docker compose: this sandbox has no project to run a stack for" >&2; exit 1; }
+d="$BRAIN_MEMORY/projects/$BRAIN_PROJECT/.stack"; mkdir -p "$d" || exit 1
+id="$(date +%s)-$$"
+{ printf '%s\n%s\n' "${BRAIN_ENGINE:-claude}" "$PWD"; [ $# -eq 0 ] || printf '%s\0' "$@"; } > "$d/$id.tmp" && mv "$d/$id.tmp" "$d/$id.req"
+n=0
+until [ -f "$d/$id.out" ]; do
+  sleep 1; n=$((n + 1))
+  [ "$n" -lt 30 ] || { rm -f "$d/$id.req"; echo "docker compose: nobody took the request — brain watch must be running on the host (brain watch install)" >&2; exit 1; }
+done
+tail -n +1 -f "$d/$id.out" & t=$!
+until [ -f "$d/$id.rc" ]; do sleep 1; done
+sleep 1; kill "$t" 2>/dev/null; wait "$t" 2>/dev/null
+exit "$(cat "$d/$id.rc")"

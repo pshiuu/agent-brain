@@ -54,6 +54,8 @@
 #   brain eval list | run <name> | score <project>
 #                                       run a playbook for real on a fixed input (an eval),
 #                                       score it and compare it with the last run
+#   brain secret set <name>             a key for the sandboxes (anthropic, openai): kept by
+#                                       sbx, or under the Docker driver by its egress proxy
 #   brain update [--check]              the base from upstream: git pull (a merge that keeps
 #                                       this brain's own commits), then ./install.sh again;
 #                                       --check only lists what it would bring
@@ -137,6 +139,15 @@ MAX_RUNS="${BRAIN_MAX_RUNS:-$(setting BRAIN_MAX_RUNS 50)}"
 # fifty windows. The rest wait in their .run-request files and start as windows close.
 MAX_PARALLEL="${BRAIN_MAX_PARALLEL:-$(setting BRAIN_MAX_PARALLEL 3)}"
 BRAIN_NOTIFY="${BRAIN_NOTIFY:-$(setting BRAIN_NOTIFY "")}"
+# Where sandboxes come from. sbx gives each one a VM with its own kernel and is the
+# default wherever it is installed. Where it does not run (an Intel Mac, a server without
+# KVM), bin/sbx-docker answers the same sbx commands on plain Docker: every sbx call below
+# goes there instead, and nothing else in the launcher knows the difference.
+SANDBOX_DRIVER="${BRAIN_SANDBOX:-$(setting BRAIN_SANDBOX auto)}"
+if [ "$SANDBOX_DRIVER" = auto ]; then
+  if command -v sbx >/dev/null 2>&1; then SANDBOX_DRIVER=sbx; else SANDBOX_DRIVER=docker; fi
+fi
+[ "$SANDBOX_DRIVER" = docker ] && sbx() { "$BRAIN/bin/sbx-docker" "$@"; }
 RUN_STATUS=""   # set by cmd_run, read by cmd_auto; declared here because set -u is on
 source "$BRAIN/bin/phase-contract.sh"
 # names_in, the root lookups (sys_roots, in_roots, playbook_dir, app_field), brief_body,
@@ -658,6 +669,7 @@ cmd_init() {
     fi
     info "building $img"
     docker build --build-arg BASE="$(engine_base "$engine")" -t "$img" "$BRAIN/templates"
+    [ "$SANDBOX_DRIVER" = docker ] && continue   # the Docker driver runs it from Docker's own store
     tar="$(mktemp "${TMPDIR:-/tmp}/brain-$engine.XXXXXX")"
     docker image save "$img" -o "$tar"
     sbx template load "$tar"
@@ -2335,6 +2347,8 @@ cmd_watch() {
     watch_new
     watch_runs
     watch_apps
+    # Under the Docker driver an agent's `docker compose` is a request; this runs it, checked.
+    [ "$SANDBOX_DRIVER" = docker ] && "$BRAIN/bin/sbx-docker" stack-tick "$MEM"
     [ "$QUEUED" = 0 ] || [ -n "${QUEUE_SAID:-}" ] || { info "queue: $QUEUED waiting for a free slot ($MAX_PARALLEL at once)"; QUEUE_SAID=1; }
     [ "$QUEUED" = 0 ] && QUEUE_SAID=""
     # The author, from the cockpit's Draft button: one at a time, in its own window. At
@@ -3100,6 +3114,8 @@ cmd_test() {
   down)        shift; cmd_down "$@" ;;
   evolve)      shift; cmd_evolve "$@" ;;
   update)      shift; cmd_update "$@" ;;
+  secret)      shift; [ "${1:-}" = set ] && [ -n "${2:-}" ] || die "usage: brain secret set <name>   (anthropic, openai, or an app's)"
+               sbx secret set "$2" ;;
   eval)        shift; cmd_eval "$@" ;;
   status)      shift; cmd_status ;;
   lint)        shift; cmd_lint ;;

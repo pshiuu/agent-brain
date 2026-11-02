@@ -1,0 +1,338 @@
+#!/usr/bin/env bash
+# The brain's sandboxes on plain Docker, for a machine sbx does not run on (an Intel Mac,
+# a server without KVM). bin/brain calls this instead of sbx when BRAIN_SANDBOX=docker,
+# with the same arguments: it answers the subset of the sbx CLI the brain uses, so the
+# launcher and its tests do not know which one they talk to.
+#
+#   ls | create | run | exec | stop | rm | ports      a sandbox: a long-lived container
+#   template ls|load                                   the images are already in Docker
+#   skills import|ls|rm|add                            the skill store, mounted read-only
+#   secret set <name>                                  keys, held by the egress proxy only
+#   mcp add|inspect|load|rm|ls                         MCP servers, reached through it
+#   policy allow|deny|ls network <hosts>               the egress rules
+#   stack-tick <memory dir>                            the agents' `docker compose` requests
+#
+# What keeps it safe without a VM per sandbox:
+#   - each sandbox is on an internal network of its own: no route out, no other sandbox;
+#     its one way out is the brain-egress proxy (bin/docker/egress.mjs), which applies the
+#     policy and puts the keys in. A key never enters a sandbox.
+#   - every capability dropped, no-new-privileges (so no sudo), a pid limit
+#   - no Docker inside: an agent's `docker compose` is run by the host after
+#     bin/docker/stack.mjs refused anything that reaches past the project
+#   - only the project, system/ (read-only) and memory/ are mounted, as under sbx
+# What it does not have: a kernel of its own per sandbox. Docker Desktop puts a VM between
+# the sandboxes and the Mac, not between one sandbox and the next. On a Linux server, run
+# the containers under gVisor (BRAIN_DOCKER_RUNTIME=runsc) to get that boundary back.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ST="${BRAIN_DOCKER_STORE:-$HOME/.agent-brain}"
+NODE_IMG="${BRAIN_DOCKER_NODE_IMAGE:-node:22-alpine}"
+mkdir -p "$ST/secrets" "$ST/mcp" "$ST/skills" && chmod 700 "$ST" "$ST/secrets"
+touch "$ST/policy"
+
+die() { echo "sbx-docker: $*" >&2; exit 1; }
+ctr() { echo "sbx-$1"; }
+net() { echo "sbx-$1-net"; }
+running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; }
+exists() { docker inspect "$1" >/dev/null 2>&1; }
+label() { docker inspect -f "{{index .Config.Labels \"$2\"}}" "$1" 2>/dev/null; }
+
+# The one container with a route out. Shared by every sandbox of this user, joined to
+# each sandbox's network under the name brain-egress.
+egress_up() {
+  docker network inspect brain-egress-out >/dev/null 2>&1 || docker network create brain-egress-out >/dev/null
+  if ! exists brain-egress; then
+    docker run -d --name brain-egress --restart unless-stopped --network brain-egress-out \
+      --cap-drop ALL --security-opt no-new-privileges --read-only \
+      -v "$HERE/docker:/app:ro" -v "$ST:/store:ro" "$NODE_IMG" node /app/egress.mjs >/dev/null \
+      || die "could not start the egress proxy"
+  elif ! running brain-egress; then docker start brain-egress >/dev/null; fi
+}
+attach_egress() { egress_up; docker network connect --alias brain-egress "$(net "$1")" brain-egress >/dev/null 2>&1 || true; }
+
+# Each run: the agent's own config, written as the agent. The skill store, the engines
+# pointed at the proxy, onboarding and folder trust already answered (sbx does the same),
+# and the MCP servers this sandbox has.
+configure() { # name
+  local c ws mcp n url key=""; c="$(ctr "$1")"; ws="$(label "$c" agent-brain.workspace)"
+  [ -s "$ST/secrets/anthropic" ] && key=1
+  mcp="$(docker exec "$c" cat /home/agent/.brain-mcp 2>/dev/null | tr '\n' ' ')"
+  docker exec -u agent -i "$c" sh -s -- "$ws" "$key" "$( [ -s "$ST/secrets/openai" ] && echo 1)" "$mcp" <<'SH' >/dev/null 2>&1
+ws="$1"; akey="$2"; okey="$3"; mcp="$4"
+mkdir -p ~/.claude ~/.agents ~/.codex
+for d in ~/.claude/skills ~/.agents/skills; do [ -e "$d" ] && [ ! -L "$d" ] || ln -sfn /opt/brain-skills "$d"; done
+node -e '
+const fs = require("fs"), H = process.env.HOME, [ws, akey, mcp] = process.argv.slice(1)
+const rd = p => { try { return JSON.parse(fs.readFileSync(p, "utf8")) } catch { return {} } }
+const j = rd(H + "/.claude.json")
+j.hasCompletedOnboarding = true; j.bypassPermissionsModeAccepted = true
+j.projects = j.projects || {}; j.projects[ws] = { ...(j.projects[ws] || {}), hasTrustDialogAccepted: true }
+j.mcpServers = Object.fromEntries(mcp.split(" ").filter(Boolean).map(n => [n, { type: "http", url: `http://brain-egress:3128/mcp/${n}` }]))
+fs.writeFileSync(H + "/.claude.json", JSON.stringify(j, null, 2))
+const s = rd(H + "/.claude/settings.json")
+if (akey) s.apiKeyHelper = "echo brain-egress"; else delete s.apiKeyHelper
+fs.writeFileSync(H + "/.claude/settings.json", JSON.stringify(s, null, 2))
+' "$ws" "$akey" "$mcp"
+# Codex ignores OPENAI_BASE_URL; this is the setting it reads (a top-level key, before any table).
+{ printf 'openai_base_url = "http://brain-egress:3128/openai/v1"\n\n[projects."%s"]\ntrust_level = "trusted"\n' "$ws"
+  for n in $mcp; do printf '\n[mcp_servers.%s]\nurl = "http://brain-egress:3128/mcp/%s"\n' "$n" "$n"; done
+} > ~/.codex/config.toml
+[ -z "$okey" ] || [ -f ~/.codex/auth.json ] || printf 'brain-egress' | codex login --with-api-key
+SH
+}
+
+ensure_up() { # name -> the container is running and can reach the proxy
+  local c; c="$(ctr "$1")"; exists "$c" || die "no sandbox '$1'"
+  running "$c" || docker start "$c" >/dev/null || die "could not start sandbox '$1'"
+  attach_egress "$1"
+}
+
+cmd_create() {
+  local name="" tpl="" mcp="" agent="" first="" a
+  local -a envs=() vols=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      -t|--template) tpl="$2"; shift 2 ;;
+      --static-mcp) mcp="$2"; shift 2 ;;
+      -e) envs+=(-e "$2"); shift 2 ;;
+      -*) die "create: unknown flag $1" ;;
+      *) if [ -z "$agent" ]; then agent="$1"
+         else
+           a="${1%:ro}"; [ -d "$a" ] || die "create: no folder $a"
+           [ -n "$first" ] || first="$a"
+           if [ "$a" != "$1" ]; then vols+=(-v "$a:$a:ro"); else vols+=(-v "$a:$a"); fi
+         fi; shift ;;
+    esac
+  done
+  [ -n "$name" ] && [ -n "$tpl" ] && [ -n "$first" ] || die "usage: create --name N -t IMAGE [-e K=V] AGENT DIR [DIR:ro]"
+  local c n rt=(); c="$(ctr "$name")"; n="$(net "$name")"
+  exists "$c" && die "sandbox '$name' exists"
+  [ -n "${BRAIN_DOCKER_RUNTIME:-}" ] && rt=(--runtime "$BRAIN_DOCKER_RUNTIME")
+  docker network inspect "$n" >/dev/null 2>&1 || docker network create --internal --label "agent-brain.sandbox=$name" "$n" >/dev/null || die "could not create its network"
+  local px=http://brain-egress:3128 nop=localhost,127.0.0.1,::1,brain-egress
+  docker create --name "$c" --hostname "$name" --network "$n" ${rt[@]+"${rt[@]}"} \
+    --label "agent-brain.sandbox=$name" --label "agent-brain.workspace=$first" --label "agent-brain.agent=$agent" \
+    --cap-drop ALL --security-opt no-new-privileges --pids-limit 4096 \
+    -e HTTPS_PROXY=$px -e HTTP_PROXY=$px -e https_proxy=$px -e http_proxy=$px -e NO_PROXY=$nop -e no_proxy=$nop \
+    -e ANTHROPIC_BASE_URL=$px/anthropic -e OPENAI_BASE_URL=$px/openai/v1 -e BRAIN_SANDBOX_DRIVER=docker \
+    ${envs[@]+"${envs[@]}"} "${vols[@]}" -v "$ST/skills:/opt/brain-skills:ro" -w "$first" \
+    "$tpl" sleep infinity >/dev/null || { docker network rm "$n" >/dev/null 2>&1; die "could not create sandbox '$name' from $tpl"; }
+  ensure_up "$name"
+  [ -z "$mcp" ] || printf '%s\n' $(echo "$mcp" | tr ',' ' ') | docker exec -i "$c" sh -c 'cat > /home/agent/.brain-mcp'
+  configure "$name"
+}
+
+cmd_run() { # --name N -- args...
+  [ "${1:-}" = --name ] || die "usage: run --name N -- [args]"
+  local name="$2" c agent; shift 2; [ "${1:-}" = -- ] && shift
+  c="$(ctr "$name")"; ensure_up "$name"; configure "$name"
+  agent="$(label "$c" agent-brain.agent)"
+  local -a cmd; case "$agent" in
+    claude) cmd=(claude --dangerously-skip-permissions) ;;
+    codex) cmd=(codex --dangerously-bypass-approvals-and-sandbox) ;;
+    *) cmd=("$agent") ;;
+  esac
+  local t=-i; [ -t 0 ] && [ -t 1 ] && t=-it
+  docker exec $t -u agent -w "$(label "$c" agent-brain.workspace)" -e TERM="${TERM:-xterm-256color}" "$c" "${cmd[@]}" "$@"
+}
+
+cmd_exec() { # N [--] cmd...
+  local name="$1"; shift; [ "${1:-}" = -- ] && shift
+  ensure_up "$name" >/dev/null
+  docker exec -i -u agent -w "$(label "$(ctr "$name")" agent-brain.workspace)" "$(ctr "$name")" "$@"
+}
+
+# Its dev stack and its published ports go with it, as they do when an sbx VM stops.
+cmd_stop() {
+  local name="$1" ids; ids="$(docker ps -q --filter "label=agent-brain.stack=$name")"
+  [ -z "$ids" ] || docker stop $ids >/dev/null
+  docker stop "$(ctr "$name")" >/dev/null
+}
+cmd_rm() {
+  [ "${1:-}" = --force ] && shift
+  local name="$1" ids
+  ids="$(docker ps -aq --filter "label=agent-brain.stack=$name") $(docker ps -aq --filter "label=agent-brain.port-of=$name")"
+  [ -z "${ids// /}" ] || docker rm -f $ids >/dev/null 2>&1
+  docker rm -f "$(ctr "$name")" >/dev/null 2>&1
+  ids="$(docker volume ls -q --filter "label=agent-brain.stack=$name")"; [ -z "$ids" ] || docker volume rm $ids >/dev/null 2>&1
+  docker network disconnect -f "$(net "$name")" brain-egress >/dev/null 2>&1
+  docker network rm "$(net "$name")" >/dev/null 2>&1
+  return 0
+}
+
+# HOST:SANDBOX from 127.0.0.1 on this machine into the sandbox: a small forwarder on a
+# network that may publish, and on the sandbox's own.
+cmd_ports() {
+  local name="$1" spec h s f
+  if [ "${2:-}" != --publish ]; then
+    docker ps --filter "label=agent-brain.port-of=$name" --format '127.0.0.1:{{.Label "agent-brain.port"}}'
+    return 0
+  fi
+  spec="$3"; h="${spec%%:*}"; s="${spec##*:}"
+  [[ "$h" =~ ^[0-9]+$ && "$s" =~ ^[0-9]+$ ]] || die "ports: '$spec' is not HOST:SANDBOX"
+  f="$(ctr "$name")-port-$h"
+  exists "$f" && { running "$f" || docker start "$f" >/dev/null; return 0; }
+  docker network inspect brain-ports >/dev/null 2>&1 || docker network create brain-ports >/dev/null
+  docker create --name "$f" --restart unless-stopped --network brain-ports -p "127.0.0.1:$h:$h" \
+    --label "agent-brain.port-of=$name" --label "agent-brain.port=$h->$s" \
+    --cap-drop ALL --security-opt no-new-privileges --read-only -v "$HERE/docker:/app:ro" \
+    "$NODE_IMG" node /app/forward.mjs "$h" "$(ctr "$name")" "$s" >/dev/null || die "could not publish $spec"
+  docker network connect "$(net "$name")" "$f" >/dev/null && docker start "$f" >/dev/null
+}
+
+cmd_ls() {
+  echo "SANDBOX  STATUS"
+  docker ps -a --filter label=agent-brain.sandbox --filter name='^sbx-' --format '{{.Label "agent-brain.sandbox"}} {{.State}}' \
+    | awk 'NF == 2'
+}
+
+# ---------- the store: skills, secrets, MCP servers, policy ----------------------------
+
+skill_name() { awk '/^---/ { n++; next } n == 1 && /^name:/ { sub(/^name:[ \t]*/, ""); gsub(/["'"'"']/, ""); print; exit }' "$1"; }
+cmd_skills() {
+  local verb="$1"; shift
+  case "$verb" in
+    ls) echo NAME; ls -1 "$ST/skills" ;;
+    rm) [ "${1:-}" = --force ] && shift; [[ "${1:-}" =~ ^[A-Za-z0-9._-]+$ ]] && rm -rf "${ST:?}/skills/$1" ;;
+    import)
+      local d
+      for d in "$HOME"/.agents/skills/*/; do
+        [ -f "$d/SKILL.md" ] || continue
+        rm -rf "$ST/skills/$(basename "$d")"; cp -RL "$d" "$ST/skills/$(basename "$d")"
+      done ;;
+    add)
+      local repo="$1" url tmp f n want=" "; shift
+      while [ $# -gt 0 ]; do case "$1" in --skill) want="$want$2 "; shift 2 ;; *) shift ;; esac; done
+      case "$repo" in *://*|*@*:*) url="$repo" ;; *) url="https://github.com/$repo" ;; esac
+      tmp="$(mktemp -d)"; git clone -q --depth 1 "$url" "$tmp/r" || { rm -rf "$tmp"; die "could not clone $repo"; }
+      while IFS= read -r f; do
+        n="$(skill_name "$f")"; [ -n "$n" ] && [[ "$n" =~ ^[A-Za-z0-9._-]+$ ]] || continue
+        [ "$want" = " " ] || case "$want" in *" $n "*) ;; *) continue ;; esac
+        rm -rf "$ST/skills/$n"; cp -R "$(dirname "$f")" "$ST/skills/$n"; rm -rf "$ST/skills/$n/.git"
+      done < <(find "$tmp/r" -name SKILL.md -not -path '*/.git/*')
+      rm -rf "$tmp" ;;
+    *) die "skills $verb is not supported" ;;
+  esac
+}
+
+cmd_secret() {
+  [ "${1:-}" = set ] || die "usage: secret set <name>   (the value from stdin, or asked for)"
+  local name="${2:-}" v
+  [[ "$name" =~ ^[A-Za-z0-9:._-]+$ ]] || die "'$name' is not a secret name"
+  if [ -t 0 ]; then printf 'value for %s (not shown): ' "$name" >&2; IFS= read -rs v; echo >&2
+  else v="$(cat)"; fi
+  [ -n "$v" ] || die "no value given"
+  ( umask 077; printf '%s' "$v" > "$ST/secrets/$name" )
+  echo "stored $name — the egress proxy puts it in; no sandbox sees it"
+}
+
+cmd_mcp() {
+  local verb="$1" name="${2:-}"; shift 2 2>/dev/null || shift $#
+  case "$verb" in
+    ls) ls -1 "$ST/mcp" ;;
+    inspect) [ -f "$ST/mcp/$name" ] && cat "$ST/mcp/$name" ;;
+    rm) rm -f "$ST/mcp/$name" ;;
+    add)
+      local url="" header=""
+      while [ $# -gt 0 ]; do case "$1" in --url) url="$2"; shift 2 ;; --header) header="$2"; shift 2 ;; *) die "mcp add: only --url and --header are supported under the Docker driver" ;; esac; done
+      [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] && [ -n "$url" ] || die "usage: mcp add <name> --url <url> [--header 'Name: value']"
+      printf '%s\n%s\n' "$url" "$header" > "$ST/mcp/$name" ;;
+    load)
+      [ "${1:-}" = --sandbox ] || die "usage: mcp load <name> --sandbox <sandbox>"
+      local c; c="$(ctr "$2")"; exists "$c" || die "no sandbox '$2'"
+      running "$c" || return 0
+      docker exec "$c" sh -c 'grep -qx "$1" /home/agent/.brain-mcp 2>/dev/null || echo "$1" >> /home/agent/.brain-mcp' _ "$name"
+      configure "$2" ;;
+    *) die "mcp $verb is not supported" ;;
+  esac
+}
+
+cmd_policy() {
+  local verb="$1" h
+  case "$verb" in
+    ls) cat "$ST/policy" ;;
+    allow|deny)
+      [ "${2:-}" = network ] || die "usage: policy $verb network <host,host>"
+      for h in $(echo "${3:-}" | tr ',' ' '); do grep -qx "$verb $h" "$ST/policy" || echo "$verb $h" >> "$ST/policy"; done
+      echo "Already covered or added: $verb ${3:-}" ;;
+    *) die "policy $verb is not supported" ;;
+  esac
+}
+
+# ---------- an agent's docker compose -----------------------------------------------
+# The sandbox's `docker` (templates/bin/docker) leaves <memory>/projects/<p>/.stack/<id>.req:
+# its engine, its working directory, then the compose arguments NUL-separated. Each is
+# checked and run here, with the output in <id>.out and the exit status in <id>.rc.
+COMPOSE_VERBS=" up down ps logs stop start restart pull build exec run config images top "
+stack_one() { # memory-dir project id
+  local d="$1/projects/$2/.stack" p="$2" id="$3" engine cwd sb c root a sub="" proj
+  local -a args=() glob=() rest=()
+  { IFS= read -r engine; IFS= read -r cwd; while IFS= read -r -d '' a; do args+=("$a"); done; } < "$d/$id.run"
+  exec > "$d/$id.out" 2>&1
+  fail() { echo "docker compose: $*"; echo 1 > "$d/$id.rc"; rm -f "$d/$id.run"; exit 0; }
+  [[ "$engine" =~ ^(claude|codex)$ ]] || fail "unknown sandbox"
+  sb="$p-$engine"; c="$(ctr "$sb")"; root="$(label "$c" agent-brain.workspace)"
+  [ -n "$root" ] || fail "no sandbox $sb"
+  case "$cwd/" in "$root"/*) ;; *) fail "run it inside the project ($root)" ;; esac
+  set -- ${args[@]+"${args[@]}"}
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --profile) [ $# -ge 2 ] || fail "$1 needs a value"; glob+=("$1" "$2"); shift 2 ;;
+      -f|--file|--env-file)
+        [ $# -ge 2 ] || fail "$1 needs a value"
+        case "$2" in /*) a="$2" ;; *) a="$cwd/$2" ;; esac
+        case "$(cd "$(dirname "$a")" 2>/dev/null && pwd -P)/" in "$(cd "$root" && pwd -P)"/*) ;; *) fail "$2 is outside the project" ;; esac
+        glob+=("$1" "$a"); shift 2 ;;
+      -p|--project-name) shift 2 ;;
+      -*) fail "the option $1 is not supported here" ;;
+      *) sub="$1"; shift; rest=("$@"); break ;;
+    esac
+  done
+  case "$COMPOSE_VERBS" in *" $sub "*) ;; *) fail "'docker compose ${sub:-}' is not supported in a sandbox (only:$COMPOSE_VERBS)" ;; esac
+  proj="brain-$(printf '%s' "$p-$cwd" | cksum | cut -d' ' -f1)"
+  docker compose --project-directory "$cwd" ${glob[@]+"${glob[@]}"} config --format json > "$d/$id.cfg" 2>&1 || { cat "$d/$id.cfg"; fail "the compose file did not render"; }
+  docker run --rm -i --network none -e NODE_IMG="$NODE_IMG" -e BRAIN_DOCKER_APP="$HERE/docker" -v "$HERE/docker:/app:ro" "$NODE_IMG" node /app/stack.mjs "$root" "$c" "$sb" < "$d/$id.cfg" > "$d/$id.json" \
+    || { cat "$d/$id.json"; fail "refused"; }
+  # The services share the sandbox's network and so its /etc/hosts: their names go there.
+  local names; names="$(docker compose -p "$proj" --project-directory "$cwd" -f "$d/$id.json" config --services 2>/dev/null | tr '\n' ' ')"
+  [ -z "$names" ] || docker exec -u root "$c" sh -c 'grep -v "# brain-stack$" /etc/hosts > /tmp/h; echo "127.0.0.1 $1 # brain-stack" >> /tmp/h; cat /tmp/h > /etc/hosts' _ "$names"
+  docker compose -p "$proj" --project-directory "$cwd" -f "$d/$id.json" "$sub" ${rest[@]+"${rest[@]}"}
+  echo $? > "$d/$id.rc"; rm -f "$d/$id.run" "$d/$id.cfg"
+}
+cmd_stack_tick() {
+  local mem="$1" r d p id
+  for r in "$mem"/projects/*/.stack/*.req; do
+    [ -f "$r" ] || continue
+    d="$(dirname "$r")"; p="$(basename "$(dirname "$d")")"; id="$(basename "$r" .req)"
+    mv "$r" "$d/$id.run" 2>/dev/null || continue
+    ( stack_one "$mem" "$p" "$id" ) &
+  done
+  # What a finished request left behind, after its sandbox has read it.
+  find "$mem"/projects/*/.stack -name '*.rc' -mmin +10 2>/dev/null | while read -r r; do rm -f "${r%.rc}".*; done
+  return 0
+}
+
+verb="${1:-}"; shift || true
+case "$verb" in
+  ls) cmd_ls ;;
+  create) cmd_create "$@" ;;
+  run) cmd_run "$@" ;;
+  exec) cmd_exec "$@" ;;
+  stop) cmd_stop "$1" ;;
+  rm) cmd_rm "$@" ;;
+  ports) cmd_ports "$@" ;;
+  template) case "${1:-}" in
+      ls) docker images --format 'docker.io/library/{{.Repository}} {{.Tag}}' | grep '^docker.io/library/brain-' ;;
+      load) : ;;
+      *) die "template ${1:-} is not supported" ;;
+    esac ;;
+  skills) cmd_skills "$@" ;;
+  secret) cmd_secret "$@" ;;
+  mcp) cmd_mcp "$@" ;;
+  policy) cmd_policy "$@" ;;
+  login) echo "the Docker driver needs no sign-in: store the engines' keys with  brain secret set anthropic  (or openai)" ;;
+  stack-tick) cmd_stack_tick "$@" ;;
+  *) die "'${verb}' is not an sbx command this driver knows" ;;
+esac
