@@ -74,22 +74,21 @@ and `brain watch` on your Mac acts on it.
 - [`sbx`](https://docs.docker.com/ai/sandboxes/) on Apple silicon, for a VM per sandbox.
   Without it (on an Intel Mac, say) the sandboxes run as hardened containers behind an
   egress proxy that holds the keys: [the Docker driver](docs/setup.md#sandboxes-without-sbx-the-docker-driver)
-- Claude Code with a Claude API key or a Pro/Max subscription, Codex with an OpenAI key or
-  a ChatGPT subscription, or both: `brain secret set anthropic|openai [--oauth]`
+- One or more agents, chosen at install: Claude Code (API key or Pro/Max subscription),
+  Codex (API key or ChatGPT subscription), Gemini CLI, OpenCode. Add one later with
+  `brain engine add <name>`
 - git. Node is only needed to run the cockpit outside Docker or to run its tests.
 
 ## Quickstart
 
 ```bash
 git clone https://github.com/pshiuu/agent-brain.git ~/agent-brain
-cd ~/agent-brain && ./install.sh     # safe to run again; --uninstall stops it all
-brain secret set anthropic --oauth   # your Claude subscription; without --oauth, an API key
-brain secret set openai --oauth      # your ChatGPT subscription, for Codex (optional)
+cd ~/agent-brain && ./install.sh     # asks a few questions; safe to run again
 ```
 
-`install.sh` checks the prerequisites and builds the two sandbox templates. It also
-starts the cockpit and `brain watch`, opens the cockpit, and offers to put `brain` on
-your PATH.
+`install.sh` asks how sandboxes should run (`sbx`, or plain Docker on an Intel Mac) and
+which agents you use, builds a sandbox image for each, offers to sign them in, starts the
+cockpit and `brain watch`, opens the cockpit, and offers to put `brain` on your PATH.
 
 A fresh brain has no playbooks. Get some from an app, or write your own:
 
@@ -110,7 +109,7 @@ brain playbook check <name>
 | | |
 |---|---|
 | **Playbook** | an ordered list of phases (`phases`: phase, role, fix-role) plus the instruction for each (`playbook.md`) and the brief a project fills in |
-| **Role** | who runs a phase: a line in `roles.conf` (engine, model, effort) and `roles/<name>.md` (what it is told). `human` is a role too |
+| **Role** | who runs a phase: a line in `roles.conf` (agent, model, effort) and `roles/<name>.md` (what it is told). `human` is a role too. Different roles can run on different agents |
 | **Review loop** | a phase with a fix-role writes `RESULT: PASS` or `FAIL` and a list of defects with ids. On FAIL the fixer runs and must answer each id, then the review runs again. A ceiling stops a loop that isn't converging |
 | **Contract** | optional per phase: files that must exist, and checks the host runs in the sandbox after the agent exits. An agent can't hand over work its check fails |
 | **Memory** | `memory/` is its own git repo: `knowledge/` (the wiki), `index.md`, client profiles, `proposals.md`, and per-project records that stay on your machine |

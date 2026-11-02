@@ -23,6 +23,10 @@ at this level or above.
   `BRAIN_MAX_PARALLEL` runs at once. A new kind of button means a new request file and a new `case` in `cmd_watch`,
   never a shell in the container. The install of a draft is the one place the cockpit
   writes `system/` itself, and it asks the host to commit right after.
+- **The agents are `system/engines.conf`.** Which one a role runs on is data; how each takes
+  a model, an effort, its role and its first prompt is a `case` in `launch`/`model_args`, and
+  its sign-in under the Docker driver is `configure` in `bin/sbx-docker`. A new agent needs a
+  line there and those three cases. This brain's choice is `BRAIN_ENGINES`.
 - **Every sandbox goes through `sbx`.** Under `BRAIN_SANDBOX=docker`, `sbx` is a function that
   calls `bin/sbx-docker`, which answers the same commands on plain Docker. A new `sbx …` call
   in the launcher needs its answer there too. Its trust decisions live in `bin/docker/`:

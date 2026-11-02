@@ -79,6 +79,35 @@ deleting the sandbox and letting `brain run` rebuild it). Policy rules apply to
 all sandboxes immediately and are idempotent — re-syncing changes nothing.
 Check with `sbx mcp ls` and `sbx policy ls --wide`.
 
+## Choosing the agents
+
+`./install.sh` asks the first time how sandboxes run (`sbx` or Docker; an Intel Mac gets
+Docker) and which agents you use. Only those get a sandbox image (a few GB each), and
+the cockpit only offers those for a role. The answers are `BRAIN_SANDBOX` and
+`BRAIN_ENGINES` in `system/brain.local.conf`; `./install.sh --choose` asks again, and
+`./install.sh --sandbox docker --agents claude,codex` answers from a script.
+
+```bash
+brain engine                  # every agent the brain knows, and which are installed
+brain engine add gemini       # build its image and offer it to roles
+brain engine remove codex     # refused while a role still runs on it
+```
+
+| agent | runs | signs in with | model | effort |
+|---|---|---|---|---|
+| `claude` | Claude Code | `brain secret set anthropic [--oauth]`: API key or Pro/Max | `opus`, `sonnet`, … | yes |
+| `codex` | Codex | `brain secret set openai [--oauth]`: API key or ChatGPT | from Codex's catalog | yes |
+| `gemini` | Gemini CLI | `brain secret set google`: a Gemini API key | `gemini-2.5-pro`, … | no |
+| `opencode` | OpenCode | the providers' keys: `anthropic`, `openai`, `google` | `provider/model` | no |
+
+The list is `system/engines.conf`: each agent's Docker Sandboxes template, where its role
+instructions go, and the efforts it takes. A role reaches every agent before its first
+token — Claude as a system prompt, the others as the file each reads from its home first
+(`~/.codex/AGENTS.md`, `~/.gemini/GEMINI.md`, `~/.config/opencode/AGENTS.md`). Under the
+Docker driver each agent's traffic goes through the egress proxy, which puts the key in;
+a Google subscription sign-in for Gemini, and subscriptions through OpenCode, are not
+supported there (use an API key, or sbx).
+
 ## Sandboxes without sbx: the Docker driver
 
 `sbx` gives every sandbox a VM with its own kernel, and it is what the brain uses wherever

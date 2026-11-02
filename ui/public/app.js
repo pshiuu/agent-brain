@@ -689,14 +689,14 @@ function draftView (name) {
     const choices = {}
     if (d.roles.length) {
       body.append($('h2', '', `New agents it proposes (${d.roles.length})`), $('p', 'sub', 'Each becomes a role: its instructions as written here, and the engine, model and effort you pick. Change them later under Roles.'))
-      body.append(modelDatalist('claude'), modelDatalist('codex'))
+      body.append(modelDatalists())
       for (const r of d.roles) {
         const det = document.createElement('details'); det.className = 'phase'
         const sum = $('summary', ''); sum.append($('span', 'name', r.name), ' ')
         const eng = $('select'), eff = $('select')
         const mod = document.createElement('input'); mod.type = 'text'; mod.value = 'default'; mod.size = 14
         mod.setAttribute('aria-label', `model for ${r.name}`)
-        for (const e of ['claude', 'codex']) { const o = $('option', '', e); o.value = e; eng.append(o) }
+        for (const e of engineChoices()) { const o = $('option', '', e); o.value = e; eng.append(o) }
         const fill = () => {
           mod.setAttribute('list', `models-${eng.value}`)
           const e = S.models[eng.value], hit = e.options.find(o => o.slug === mod.value)
@@ -965,6 +965,11 @@ function sectionEditor (playbook, phase) {
 /* Model suggestions come from the server: claude's documented aliases, and codex's own
    model catalog when it is mounted. The field is a free-text input with a datalist
    rather than a select, so a model neither side knows about can still be typed. */
+/* The agents a role can run on: the ones this brain installed, and the role's own when it
+   names one that is not (so the select still shows the truth). */
+const engineChoices = (current = '') => S.engines.filter(e => e.on || e.name === current).map(e => e.name)
+const modelDatalists = () => frag(...S.engines.filter(e => S.models[e.name]).map(e => modelDatalist(e.name)))
+
 function modelDatalist (engine) {
   const dl = document.createElement('datalist')
   dl.id = `models-${engine}`
@@ -1021,9 +1026,9 @@ function roleSkillPicker (r) {
 function rolesView () {
   const box = $('div'), head = $('div', 'head')
   head.append($('h1', '', 'Roles'), $('p', 'sub', 'Engine, model and reasoning effort per role. Each change rewrites that one line of roles.conf. Effort "default" passes no flag, so nothing changes until you pick one.'))
-  head.append($('p', 'tag', `models: claude from ${S.models.claude.source}, codex from ${S.models.codex.source}. The model box is free text, so anything your CLI accepts works.`))
+  head.append($('p', 'tag', `agents: ${S.engines.filter(e => e.on).map(e => `${e.name} (models: ${S.models[e.name]?.source || 'free text'})`).join(', ')} — add another with brain engine add. The model box is free text, so anything your CLI accepts works.`))
   box.append(head)
-  box.append(modelDatalist('claude'), modelDatalist('codex'))
+  box.append(modelDatalists())
   const mine = lintBlock(S.lint, f => f.where.startsWith('roles.conf'))
   if (mine) box.append(mine)
 
@@ -1051,7 +1056,7 @@ function rolesView () {
     mod.type = 'text'; mod.value = r.model || 'default'; mod.size = 15
     mod.setAttribute('aria-label', `model for ${r.role}`)
     mod.title = 'Model name. Suggestions come from the engine; any name your CLI accepts works.'
-    for (const e of ['claude', 'codex']) { const o = $('option', '', e); o.value = e; o.selected = e === r.engine; eng.append(o) }
+    for (const e of engineChoices(r.engine)) { const o = $('option', '', e); o.value = e; o.selected = e === r.engine; eng.append(o) }
     const bindList = () => mod.setAttribute('list', `models-${eng.value}`)
     bindList()
     // Reasoning levels are per model, not just per engine: gpt-5.5 stops at xhigh
@@ -1107,7 +1112,7 @@ function newRoleForm () {
   purpose.setAttribute('aria-label', 'what the role is for')
   const eng = $('select')
   eng.setAttribute('aria-label', 'engine')
-  for (const e of ['claude', 'codex']) { const o = $('option', '', e); o.value = e; eng.append(o) }
+  for (const e of engineChoices()) { const o = $('option', '', e); o.value = e; eng.append(o) }
   const mod = document.createElement('input')
   mod.type = 'text'; mod.value = 'default'; mod.size = 12
   mod.setAttribute('aria-label', 'model')

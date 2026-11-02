@@ -15,6 +15,7 @@
 //                                          here: the agent only ever holds a placeholder.
 //                                          /anthropic takes an API key, else a Claude
 //                                          subscription token (claude setup-token)
+//   /google/…                              Gemini's API, with the Gemini key put in
 //   /chatgpt/…  /openai-oauth/token        Codex on a ChatGPT subscription: the real tokens
 //                                          live in /oauth/openai.json (writable, so they
 //                                          can be refreshed here); Codex holds placeholders
@@ -104,6 +105,11 @@ export function route (path) {
       return { url: 'https://api.anthropic.com' + rest, set: sub ? { authorization: `Bearer ${sub}` } : {}, drop: sub ? ['x-api-key'] : [] }
     }
     return { url: 'https://api.openai.com' + rest, set: key ? { authorization: `Bearer ${key}` } : {}, drop: [] }
+  }
+  const g = path.match(/^\/google(\/.*)?$/)
+  if (g) {
+    const key = secret('google')
+    return { url: 'https://generativelanguage.googleapis.com' + (g[1] || '/'), set: key ? { 'x-goog-api-key': key } : {}, drop: [] }
   }
   const mcp = path.match(/^\/mcp\/([A-Za-z0-9][A-Za-z0-9._-]*)(\/.*)?$/)
   if (mcp) {

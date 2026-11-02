@@ -101,7 +101,9 @@ it('setRoleLine changes exactly one line and keeps both column alignments', () =
   const cols = s => [...new Set(s.split('\n').filter(l => l.trim() && !l.trimStart().startsWith('#'))
     .map(l => { const f = l.trim().split(/\s+/); return l.indexOf(f[1]) + ':' + l.indexOf(f[2], l.indexOf(f[1]) + 1) }))].sort()
   assert.deepEqual(cols(out), cols(src))
-  throws(() => b.setRoleLine(src, 'payload-builder', 'gpt', 'x'), /claude or codex/)
+  throws(() => b.setRoleLine(src, 'payload-builder', 'gpt', 'x'), /engines\.conf/)
+  throws(() => b.setRoleLine(src, 'payload-builder', 'gemini', 'default', 'high'), /no reasoning effort/, 'gemini has no effort setting')
+  assert.match(b.setRoleLine(src, 'payload-builder', 'opencode', 'anthropic/claude-sonnet-4-5'), /payload-builder\s+opencode\s+anthropic\/claude-sonnet-4-5/, 'a provider/model name')
 })
 it('replaceSection rewrites one body and leaves title, description and preamble intact', () => {
   const src = readFileSync(join(FIX, 'system/playbooks/rebuild-payload/playbook.md'), 'utf8')
@@ -786,7 +788,7 @@ it('asks the author for a draft, shows it, and installs both halves of each prop
   assert.deepEqual(d.problems.filter(p => p.level === 'error'), [], 'a role the draft proposes is not a missing role')
   assert.equal(b.requestDraft({ name: 'seo-article', description: 'add a fact check' }).again, true, 'a second round revises instead of starting over')
   rmSync(join(dir, 'REQUEST.md')); rmSync(join(FIX, 'memory/.draft-request'))
-  throws(() => b.installDraft({ name: 'seo-article', roles: { 'seo-writer': { engine: 'bash' } } }), /claude or codex/)
+  throws(() => b.installDraft({ name: 'seo-article', roles: { 'seo-writer': { engine: 'bash' } } }), /engines\.conf/)
   const inst = b.installDraft({ name: 'seo-article', roles: { 'seo-writer': { engine: 'codex', model: 'gpt-6-astra', effort: 'high' } } })
   assert.deepEqual(inst.roles, ['seo-editor', 'seo-writer'])
   assert.ok(existsSync(join(FIX, 'system/playbooks/seo-article/phases')) && existsSync(join(FIX, 'system/playbooks/seo-article/brief.md')), 'the playbook, with a brief even when the author wrote none')
@@ -1127,6 +1129,24 @@ console.log('app settings: secrets and settings from app.conf')
   srv.close()
   for (const f of ['.secret-hub.request', '.secret-tok.request', '.secret-tok.status']) rmSync(join(FIX, 'memory', f), { force: true })
   rmSync(A, { recursive: true }); rmSync(join(FIX, 'system/config'), { recursive: true })
+}
+
+console.log('engines: the agents in system/engines.conf, and the ones this brain installed')
+{
+  const local = join(FIX, 'system/brain.local.conf'), before = existsSync(local) ? readFileSync(local, 'utf8') : null
+  it('reads every agent, and BRAIN_ENGINES says which are installed', () => {
+    writeFileSync(local, 'BRAIN_ENGINES=claude gemini\n')
+    const e = Object.fromEntries(b.engines().map(x => [x.name, x]))
+    assert.deepEqual(Object.keys(e), ['claude', 'codex', 'gemini', 'opencode'])
+    assert.deepEqual([e.claude.on, e.codex.on, e.gemini.on], [true, false, true])
+    assert.deepEqual(e.gemini.efforts, []); assert.equal(e.opencode.role, '.config/opencode/AGENTS.md')
+    assert.ok(b.models().gemini, 'every agent has a model list, free text for the new ones')
+    const conf = readFileSync(join(FIX, 'system/roles.conf'), 'utf8')
+    writeFileSync(join(FIX, 'system/roles.conf'), conf + 'idle-codex  codex  default\n')
+    assert.ok(b.lint().some(f => /runs on codex, which this brain has not installed: brain engine add codex/.test(f.msg)))
+    writeFileSync(join(FIX, 'system/roles.conf'), conf)
+  })
+  if (before === null) rmSync(local); else writeFileSync(local, before)
 }
 
 console.log('base update: the banner brain watch feeds, and the Update request')

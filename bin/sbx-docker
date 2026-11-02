@@ -61,8 +61,9 @@ codex_auth() { if [ -s "$ST/secrets/openai" ]; then echo key; elif [ -s "$ST/oau
 configure() { # name
   local c ws mcp; c="$(ctr "$1")"; ws="$(label "$c" agent-brain.workspace)"
   mcp="$(docker exec "$c" cat /home/agent/.brain-mcp 2>/dev/null | tr '\n' ' ')"
-  docker exec -u agent -i "$c" sh -s -- "$ws" "$(claude_auth)" "$(codex_auth)" "$mcp" <<'SH' >/dev/null 2>&1
-ws="$1"; cauth="$2"; xauth="$3"; mcp="$4"
+  local keys; keys="$(cd "$ST/secrets" && for k in anthropic openai google; do [ -s "$k" ] && printf '%s ' "$k"; done)"
+  docker exec -u agent -i "$c" sh -s -- "$ws" "$(claude_auth)" "$(codex_auth)" "$mcp" "$keys" <<'SH' >/dev/null 2>&1
+ws="$1"; cauth="$2"; xauth="$3"; mcp="$4"; keys="$5"
 mkdir -p ~/.claude ~/.agents ~/.codex
 for d in ~/.claude/skills ~/.agents/skills; do [ -e "$d" ] && [ ! -L "$d" ] || ln -sfn /opt/brain-skills "$d"; done
 node -e '
@@ -91,6 +92,25 @@ case "$xauth" in
   key) grep -q '"apikey"' ~/.codex/auth.json 2>/dev/null || printf 'brain-egress' | codex login --with-api-key ;;
   oauth) curl -sf --noproxy '*' http://brain-egress:3128/openai-oauth/placeholder > ~/.codex/auth.json.tmp && mv ~/.codex/auth.json.tmp ~/.codex/auth.json ;;
 esac
+# Gemini CLI: signed in with an API key (the proxy's /google puts the real one in), the
+# workspace trusted. OpenCode: each provider with a stored key pointed at the proxy.
+if command -v gemini >/dev/null; then
+  mkdir -p ~/.gemini
+  node -e '
+const fs = require("fs"), H = process.env.HOME + "/.gemini/", ws = process.argv[1]
+const rd = p => { try { return JSON.parse(fs.readFileSync(p, "utf8")) } catch { return {} } }
+const s = rd(H + "settings.json"); s.security = { ...(s.security || {}), auth: { ...(s.security?.auth || {}), selectedType: "gemini-api-key" } }
+fs.writeFileSync(H + "settings.json", JSON.stringify(s, null, 2))
+const t = rd(H + "trustedFolders.json"); t[ws] = "TRUST_FOLDER"; fs.writeFileSync(H + "trustedFolders.json", JSON.stringify(t, null, 2))' "$ws"
+fi
+if command -v opencode >/dev/null; then
+  mkdir -p ~/.config/opencode
+  node -e '
+const fs = require("fs"), keys = process.argv[1].split(" ").filter(Boolean), px = "http://brain-egress:3128"
+const base = { anthropic: px + "/anthropic/v1", openai: px + "/openai/v1", google: px + "/google/v1beta" }
+const provider = Object.fromEntries(keys.map(k => [k, { options: { baseURL: base[k], apiKey: "brain-egress" } }]))
+fs.writeFileSync(process.env.HOME + "/.config/opencode/opencode.json", JSON.stringify({ $schema: "https://opencode.ai/config.json", autoupdate: false, provider }, null, 2))' "$keys"
+fi
 SH
 }
 
@@ -147,7 +167,9 @@ cmd_run() { # --name N -- args...
     *) cmd=("$agent") ;;
   esac
   # A subscription's placeholder, and where Codex sends its refresh: both only for the agent.
-  local -a env=(-e TERM="${TERM:-xterm-256color}" -e CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://brain-egress:3128/openai-oauth/token)
+  local -a env=(-e TERM="${TERM:-xterm-256color}" -e CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://brain-egress:3128/openai-oauth/token
+    -e GOOGLE_GEMINI_BASE_URL=http://brain-egress:3128/google)
+  [ -s "$ST/secrets/google" ] && env+=(-e GEMINI_API_KEY=brain-egress)
   [ "$(claude_auth)" = oauth ] && env+=(-e CLAUDE_CODE_OAUTH_TOKEN=brain-egress)
   local t=-i; [ -t 0 ] && [ -t 1 ] && t=-it
   docker exec $t -u agent -w "$(label "$c" agent-brain.workspace)" "${env[@]}" "$c" "${cmd[@]}" "$@"
@@ -321,7 +343,7 @@ stack_one() { # memory-dir project id
   { IFS= read -r engine; IFS= read -r cwd; while IFS= read -r -d '' a; do args+=("$a"); done; } < "$d/$id.run"
   exec > "$d/$id.out" 2>&1
   fail() { echo "docker compose: $*"; echo 1 > "$d/$id.rc"; rm -f "$d/$id.run"; exit 0; }
-  [[ "$engine" =~ ^(claude|codex)$ ]] || fail "unknown sandbox"
+  [[ "$engine" =~ ^[a-z0-9][a-z0-9-]*$ ]] || fail "unknown sandbox"
   sb="$p-$engine"; c="$(ctr "$sb")"; root="$(label "$c" agent-brain.workspace)"
   [ -n "$root" ] || fail "no sandbox $sb"
   case "$cwd/" in "$root"/*) ;; *) fail "run it inside the project ($root)" ;; esac

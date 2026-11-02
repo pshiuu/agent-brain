@@ -79,6 +79,16 @@ function codexCatalog () {
   return catalogCache
 }
 
+/** The agents, from system/engines.conf (bin/brain's engine_line), each with whether this
+ *  brain installed it (BRAIN_ENGINES). Declared before any model list reads it. */
+export function engines () {
+  const on = setting('BRAIN_ENGINES', 'claude codex').split(/[\s,]+/).filter(Boolean)
+  return (read(join(SYS, 'engines.conf')) || '').split('\n').filter(l => l.trim() && !l.startsWith('#'))
+    .map(l => l.trim().split(/\s+/)).filter(f => f.length >= 5)
+    .map(([name, template, role, efforts, ...label]) => ({ name, template, role, efforts: efforts === '-' ? [] : efforts.split(','), label: label.join(' '), on: on.includes(name) }))
+}
+const engineNames = () => engines().map(e => e.name)
+
 export function models () {
   const cat = codexCatalog()
   const codexEfforts = [...new Set(cat.models.flatMap(m => m.efforts))]
@@ -92,7 +102,13 @@ export function models () {
       options: [{ slug: 'default', label: 'default', description: "codex's own configured default", efforts: codexEfforts.length ? codexEfforts : CODEX_FALLBACK_EFFORTS }, ...cat.models],
       efforts: codexEfforts.length ? codexEfforts : CODEX_FALLBACK_EFFORTS,
       source: cat.models.length ? `codex catalog, fetched ${cat.fetched}` : 'catalog not mounted, showing a fallback list'
-    }
+    },
+    // The others: the model is free text (OpenCode's as provider/model), efforts as engines.conf says.
+    ...Object.fromEntries(engines().filter(e => !['claude', 'codex'].includes(e.name)).map(e => [e.name, {
+      options: [{ slug: 'default', label: 'default', description: `${e.name}'s own default`, efforts: e.efforts }],
+      efforts: e.efforts,
+      source: e.name === 'opencode' ? 'free text: provider/model, e.g. anthropic/claude-sonnet-4-5' : 'free text'
+    }]))
   }
 }
 
@@ -270,10 +286,11 @@ export function replaceSection (text, phase, body) {
  *  carries a mid-file `# rebuild-payload` divider and two different column alignments
  *  that a regenerate would flatten. */
 export function setRoleLine (text, role, engine, model, effort = '') {
-  if (!['claude', 'codex'].includes(engine)) throw new HttpError(400, 'engine must be claude or codex')
-  if (!/^[A-Za-z0-9._-]+$/.test(model || '')) throw new HttpError(400, 'bad model name')
+  if (!engineNames().includes(engine)) throw new HttpError(400, `engine must be one of system/engines.conf: ${engineNames().join(', ')}`)
+  if (!/^[A-Za-z0-9._/-]+$/.test(model || '')) throw new HttpError(400, 'bad model name')
   const use = effort && effort !== 'default' ? effort : ''
   const ok = effortsFor(engine, model)
+  if (use && !ok.length) throw new HttpError(400, `${engine} has no reasoning effort setting`)
   if (use && !ok.includes(use)) {
     throw new HttpError(400, `${engine}${model && model !== 'default' ? ` with ${model}` : ''} takes effort ${ok.join(', ')} (got '${use}')`)
   }
@@ -1893,12 +1910,15 @@ export function lint () {
   for (const r of rs) {
     if (r.fields < 3 || r.fields > 4) add('error', `roles.conf:${r.line + 1}`,
       `'${r.role}' has ${r.fields} field(s), needs 3 or 4: role engine model [effort].`)
-    if (r.effort && ['claude', 'codex'].includes(r.engine)) {
+    const eng = engines().find(e => e.name === r.engine)
+    if (r.effort && eng) {
       const ok = effortsFor(r.engine, r.model)
-      if (!ok.includes(r.effort)) add('error', `roles.conf:${r.line + 1}`,
-        `effort '${r.effort}' is not valid for ${r.engine} with model ${r.model}. Allowed: ${ok.join(', ')}.`)
+      if (!ok.includes(r.effort)) add('error', `roles.conf:${r.line + 1}`, ok.length
+        ? `effort '${r.effort}' is not valid for ${r.engine} with model ${r.model}. Allowed: ${ok.join(', ')}.`
+        : `${r.engine} has no reasoning effort setting: leave the fourth column empty.`)
     }
-    if (r.engine && !['claude', 'codex'].includes(r.engine)) add('error', `roles.conf:${r.line + 1}`, `engine '${r.engine}' must be claude or codex`)
+    if (r.engine && !eng) add('error', `roles.conf:${r.line + 1}`, `engine '${r.engine}' is not in system/engines.conf (${engineNames().join(', ')})`)
+    else if (eng && !eng.on) add('error', `roles.conf:${r.line + 1}`, `'${r.role}' runs on ${r.engine}, which this brain has not installed: brain engine add ${r.engine}`)
     if (!r.doc) {
       const ci = roleFiles.find(f => f.toLowerCase() === r.role.toLowerCase())
       if (ci) add('error', `roles.conf:${r.line + 1}`, `'${r.role}' resolves to roles/${ci}.md only because macOS is case-insensitive. The Linux sandbox will not find it.`)
@@ -2241,7 +2261,7 @@ export function installDraft ({ name, roles: choices = {} }) {
   for (const r of d.roles) {
     roleDoc(r.name)
     const c = choices[r.name] || {}
-    if (c.engine && !['claude', 'codex'].includes(c.engine)) throw new HttpError(400, `engine for '${r.name}' must be claude or codex`)
+    if (c.engine && !engineNames().includes(c.engine)) throw new HttpError(400, `engine for '${r.name}' must be one of system/engines.conf: ${engineNames().join(', ')}`)
   }
   const conf = read(join(SYS, 'roles.conf')) || ''
   const installed = []
@@ -2433,7 +2453,7 @@ export function knowledgeGraph () {
 
 export function state () {
   return {
-    playbooks: playbooks(), apps: apps(), store: appStore(), base: baseUpdate(), clientsOn: clientsOn(), roles: roles(), skills: skills(), sandbox: sandbox(), projects: projects(), clients: clients(), archivedClients: archivedClients(), knowledge: knowledge(), proposals: proposals(read(join(MEM, 'proposals.md'))), examples: examples(), sources: sources(), lint: lint(), models: models(), maxFixLoops: MAX_FIX_LOOPS, hostBrain: HOST_BRAIN, hostDev: HOST_DEV, watching: watching(), evolvePending: existsSync(join(MEM, '.evolve-request')),
+    playbooks: playbooks(), apps: apps(), store: appStore(), base: baseUpdate(), engines: engines(), clientsOn: clientsOn(), roles: roles(), skills: skills(), sandbox: sandbox(), projects: projects(), clients: clients(), archivedClients: archivedClients(), knowledge: knowledge(), proposals: proposals(read(join(MEM, 'proposals.md'))), examples: examples(), sources: sources(), lint: lint(), models: models(), maxFixLoops: MAX_FIX_LOOPS, hostBrain: HOST_BRAIN, hostDev: HOST_DEV, watching: watching(), evolvePending: existsSync(join(MEM, '.evolve-request')),
     maxParallel: Number(setting('BRAIN_MAX_PARALLEL', 3)) || 0,
     pending: { new: pendingProjects(), drafts: drafts(), draft: (read(join(MEM, '.draft-request')) || '').trim() || null, commit: existsSync(join(MEM, '.commit-request')) }
   }

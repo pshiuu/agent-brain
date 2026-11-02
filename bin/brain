@@ -54,6 +54,9 @@
 #   brain eval list | run <name> | score <project>
 #                                       run a playbook for real on a fixed input (an eval),
 #                                       score it and compare it with the last run
+#   brain engine [ls|add|remove]        the agents this brain runs (system/engines.conf):
+#                                       add builds one later, remove refuses while a role uses it
+#   brain config get|set KEY [VALUE]    a setting in system/brain.local.conf
 #   brain secret set <name> [--oauth]   a key for the sandboxes (anthropic, openai): kept by
 #                                       sbx, or under the Docker driver by its egress proxy;
 #                                       --oauth signs in to a Claude or ChatGPT subscription
@@ -239,12 +242,25 @@ copy_example() { # -> name of the example copied into system/playbooks
 
 # ---------- helpers ----------------------------------------------------------
 
+# The agents, from system/engines.conf: every one the brain knows, and the ones this brain
+# installed (BRAIN_ENGINES, set by install.sh and brain engine add).
+engine_line() { awk -v e="$1" '$1 !~ /^#/ && $1 == e { print; exit }' "$SYS/engines.conf" 2>/dev/null; }
+engine_field() { engine_line "$1" | awk -v f="$2" '{ print $f }'; } # engine column -> value
+engines_known() { awk '$1 !~ /^#/ && NF >= 5 { print $1 }' "$SYS/engines.conf" 2>/dev/null; }
+engines_on() { local e; for e in $(setting BRAIN_ENGINES "claude codex" | tr ',' ' '); do [ -n "$(engine_line "$e")" ] && echo "$e"; done; return 0; }
+engine_on() { case " $(engines_on | tr '\n' ' ') " in *" $1 "*) return 0 ;; esac; return 1; } # no grep -q: under pipefail its early exit fails the pipe
+engine_label() { engine_line "$1" | awk '{ $1 = $2 = $3 = $4 = ""; sub(/^ +/, ""); print }'; }
 engine_base() {
-  case "$1" in
-    claude) echo "claude-code-docker" ;;
-    codex)  echo "codex-docker" ;;
-    *) die "unknown engine '$1' (use claude or codex)" ;;
-  esac
+  local t; t="$(engine_field "$1" 2)"
+  [ -n "$t" ] || die "unknown engine '$1' — system/engines.conf knows: $(engines_known | tr '\n' ' ')"
+  echo "$t"
+}
+
+# system/brain.local.conf, this brain's own settings: KEY=value, one per line, replaced in place.
+set_setting() { # KEY value
+  local f="$SYS/brain.local.conf"
+  [[ "$1" =~ ^[A-Z][A-Z0-9_]*$ ]] || die "'$1' is not a setting name"
+  { grep -v "^[[:space:]]*$1[[:space:]]*=" "$f" 2>/dev/null || true; printf '%s=%s\n' "$1" "$2"; } > "$f.tmp" && mv "$f.tmp" "$f"
 }
 
 role_cfg() { # role -> "engine model effort"
@@ -525,6 +541,8 @@ model_args() { # engine model effort -> CLI args for the agent
   if [ -n "$model" ] && [ "$model" != "default" ]; then
     if [ "$engine" = "claude" ]; then printf '%s\n' --model "$model"; else printf '%s\n' -m "$model"; fi
   fi
+  # Effort is Claude's and Codex's; launch refused it for an engine without the setting.
+  case "$engine" in claude|codex) ;; *) return 0 ;; esac
   # Reasoning effort. Empty or "default" passes no flag at all, so a 3-column
   # roles.conf keeps behaving exactly as before.
   if [ -n "$effort" ] && [ "$effort" != "default" ]; then
@@ -591,10 +609,11 @@ launch() { # engine model effort prompt [role]
   # nothing at all, so a typo in roles.conf would quietly run the phase at default
   # effort. Checked against the union of both engines' values — the per-model limits
   # are in Codex's catalog, which the cockpit reads and this cannot.
-  case "$effort" in
-    ''|default|low|medium|high|xhigh|max) ;;
-    none) [ "$engine" = codex ] || die "effort 'none' is a codex value; claude takes low medium high xhigh max" ;;
-    *) die "unknown effort '$effort' for $engine — low, medium, high, xhigh, max${engine:+$([ "$engine" = codex ] && echo ', none')}. Left unchecked the CLI ignores it and the phase runs at default effort." ;;
+  engine_on "$engine" || die "this brain has not installed $engine ($(engine_label "$engine")) — add it with: brain engine add $engine"
+  local efforts; efforts="$(engine_field "$engine" 4)"
+  case "$effort" in ''|default) ;; *)
+    [ "$efforts" != - ] || die "$engine has no reasoning effort setting — leave the column empty for this role"
+    case ",$efforts," in *",$effort,"*) ;; *) die "unknown effort '$effort' for $engine — $(echo "$efforts" | tr ',' ' '). Left unchecked the CLI ignores it and the phase runs at default effort." ;; esac ;;
   esac
   ensure_sandbox "$engine"
   ensure_skills
@@ -623,22 +642,33 @@ launch() { # engine model effort prompt [role]
     if [ "$engine" = claude ] && [ -n "$rf" ] && [ -f "$rf" ]; then
       margs+=(--append-system-prompt-file "$rf")
     fi
-    # Codex has no such flag, but it reads $CODEX_HOME/AGENTS.md — the container's own
-    # home, never your repo — before any AGENTS.md in the workspace. Confirmed with
-    # `codex debug prompt-input`: the role text is in the model-visible prompt with the
-    # file there and absent without it. Written fresh every launch, and cleared when
-    # there is no role, so one phase's role never leaks into the next.
-    if [ "$engine" = codex ]; then
+    # The others have no such flag, but each reads a file in its own home before any in
+    # the workspace (engines.conf's role column): Codex ~/.codex/AGENTS.md, Gemini
+    # ~/.gemini/GEMINI.md, OpenCode ~/.config/opencode/AGENTS.md — the container's home,
+    # never your repo. For Codex, confirmed with `codex debug prompt-input`: the role text
+    # is in the model-visible prompt with the file there and absent without it. Written
+    # fresh every launch, and cleared when there is no role, so one phase's role never
+    # leaks into the next.
+    local home_file; home_file="$(engine_field "$engine" 3)"
+    if [ -n "$home_file" ] && [ "$home_file" != - ]; then
       if [ -n "$rf" ] && [ -f "$rf" ]; then
-        sbx exec "$SANDBOX" -- sh -c 'mkdir -p "${CODEX_HOME:-$HOME/.codex}" && cp "$1" "${CODEX_HOME:-$HOME/.codex}/AGENTS.md"' _ "$rf" >/dev/null 2>&1 \
-          || info "could not place the role as the sandbox's AGENTS.md — the prompt still names the file"
+        sbx exec "$SANDBOX" -- sh -c 'mkdir -p "$(dirname "$HOME/$2")" && cp "$1" "$HOME/$2"' _ "$rf" "$home_file" >/dev/null 2>&1 \
+          || info "could not place the role at ~/$home_file in the sandbox — the prompt still names the file"
       else
-        sbx exec "$SANDBOX" -- sh -c 'rm -f "${CODEX_HOME:-$HOME/.codex}/AGENTS.md"' >/dev/null 2>&1 || true
+        sbx exec "$SANDBOX" -- sh -c 'rm -f "$HOME/$1"' _ "$home_file" >/dev/null 2>&1 || true
       fi
     fi
   fi
+  # How each takes the opening prompt and still stays interactive, and runs without asking
+  # for each tool: the sandbox is the boundary. (Claude's and Codex's templates start them
+  # that way already.)
+  case "$engine" in
+    gemini) margs+=(--yolo -i "$prompt") ;;
+    opencode) margs+=(--auto --prompt "$prompt") ;;
+    *) margs+=("$prompt") ;;
+  esac
   info "starting $engine${model:+ ($model)}${effort:+ effort=$effort} in $SANDBOX"
-  sbx run --name "$SANDBOX" -- ${margs[@]+"${margs[@]}"} "$prompt"
+  sbx run --name "$SANDBOX" -- "${margs[@]}"
 }
 
 header() {
@@ -657,25 +687,29 @@ EOF
 
 # ---------- commands ---------------------------------------------------------
 
+# One agent's sandbox image: built on its Docker Sandboxes template, then loaded into sbx.
+# The tag carries a hash of templates/, so a loaded tag is exactly this build: skip the
+# minutes of save and load, which is what makes running init (or install.sh) again cheap.
+build_engine() { # engine
+  local engine="$1" img="brain-$1:$TPL_VERSION" tar
+  if sbx template ls 2>/dev/null | awk '{ print $1 ":" $2 }' | grep -qx "docker.io/library/$img"; then
+    info "$img is already loaded in sbx"; return 0
+  fi
+  info "building $img ($(engine_label "$engine"))"
+  docker build --build-arg BASE="$(engine_base "$engine")" -t "$img" "$BRAIN/templates" || die "could not build $img"
+  [ "$SANDBOX_DRIVER" = docker ] && return 0   # the Docker driver runs it from Docker's own store
+  tar="$(mktemp "${TMPDIR:-/tmp}/brain-$engine.XXXXXX")"
+  docker image save "$img" -o "$tar"
+  sbx template load "$tar"
+  rm -f "$tar"
+}
+
 cmd_init() {
   command -v sbx >/dev/null || die "sbx not found"
   command -v docker >/dev/null || die "docker not found (building templates needs Docker Desktop, see docs/setup.md)"
-  local engine img tar
-  for engine in claude codex; do
-    img="brain-$engine:$TPL_VERSION"
-    # The tag carries a hash of templates/, so a loaded tag is exactly this build: skip
-    # the minutes of save and load, which is what makes running init (or install.sh) again cheap.
-    if sbx template ls 2>/dev/null | awk '{ print $1 ":" $2 }' | grep -qx "docker.io/library/$img"; then
-      info "$img is already loaded in sbx"; continue
-    fi
-    info "building $img"
-    docker build --build-arg BASE="$(engine_base "$engine")" -t "$img" "$BRAIN/templates"
-    [ "$SANDBOX_DRIVER" = docker ] && continue   # the Docker driver runs it from Docker's own store
-    tar="$(mktemp "${TMPDIR:-/tmp}/brain-$engine.XXXXXX")"
-    docker image save "$img" -o "$tar"
-    sbx template load "$tar"
-    rm -f "$tar"
-  done
+  [ -n "$(engines_on)" ] || die "no agents chosen — BRAIN_ENGINES in system/brain.local.conf names none of system/engines.conf ($(engines_known | tr '\n' ' '))"
+  local engine
+  for engine in $(engines_on); do build_engine "$engine"; done
   cmd_sync_skills
   cmd_sync_sandbox
   if ! git -C "$BRAIN" rev-parse --git-dir >/dev/null 2>&1; then
@@ -1158,7 +1192,7 @@ playbook_by_agent() { # dir name [engine] [model] [effort] -> playbook-author dr
   read -r r_engine r_model r_effort <<<"$(role_cfg playbook-author)"
   while [ -z "$engine" ]; do
     engine="$(ask 'engine' "$r_engine")"
-    case "$engine" in claude|codex) ;; *) echo "    claude or codex"; engine="" ;; esac
+    engine_on "$engine" || { echo "    one of: $(engines_on | tr '\n' ' ')"; engine=""; }
   done
   [ -n "$model" ]  || model="$(ask 'model (or default)' "$r_model")"
   [ -n "$effort" ] || effort="$(ask 'reasoning effort (enter = the engine default)' "$r_effort")"
@@ -2964,7 +2998,7 @@ eval_run() { # name
   ( cd "$dir" && BRAIN_EVAL=1 cmd_auto ) || rc=$?
   eval_score "$project" "$rc"
   # Its sandboxes were for this run alone; the project's record and code folder stay.
-  for e in claude codex; do sandbox_exists "$project-$e" && { sbx rm --force "$project-$e" >/dev/null 2>&1 || true; }; done
+  for e in $(engines_known); do sandbox_exists "$project-$e" && { sbx rm --force "$project-$e" >/dev/null 2>&1 || true; }; done
   return 0
 }
 
@@ -3033,6 +3067,53 @@ base_check() {
     git -C "$BRAIN" log --reverse --format='%h%x09%s' 'HEAD..@{u}'
   } > "$MEM/.base-update.tmp" && mv "$MEM/.base-update.tmp" "$MEM/.base-update"
   info "base: $(grep -vc '^#' "$MEM/.base-update") change(s) to come from $up"
+}
+
+# The agents this brain runs. `add` builds the image and records the choice; `remove`
+# refuses while a role still runs on it, and leaves the image for docker image rm.
+cmd_engine() {
+  local verb="${1:-ls}" e on hint; shift || true
+  case "$verb" in
+    ls)
+      for e in $(engines_known); do
+        engine_on "$e" && on="installed" || on="—"
+        printf '  %-9s %-10s %s\n' "$e" "$on" "$(engine_label "$e")"
+      done
+      info "add one with: brain engine add <name>" ;;
+    add)
+      [ $# -gt 0 ] || die "usage: brain engine add <name> [name…]   ($(engines_known | tr '\n' ' '))"
+      for e in "$@"; do [ -n "$(engine_line "$e")" ] || die "unknown engine '$e' — system/engines.conf knows: $(engines_known | tr '\n' ' ')"; done
+      set_setting BRAIN_ENGINES "$( { engines_on; printf '%s\n' "$@"; } | awk '!seen[$0]++' | paste -sd' ' -)"
+      for e in "$@"; do
+        build_engine "$e"
+        case "$e" in
+          claude) hint="brain secret set anthropic --oauth   (a Claude subscription; without --oauth, an API key)" ;;
+          codex) hint="brain secret set openai --oauth   (a ChatGPT subscription; without --oauth, an API key)" ;;
+          gemini) hint="brain secret set google   (a Gemini API key)" ;;
+          opencode) hint="brain secret set anthropic | openai | google   (the providers' API keys; pick a model as provider/model)" ;;
+          *) hint="" ;;
+        esac
+        info "$e is ready${hint:+ — sign it in: $hint}"
+      done
+      info "agents: $(engines_on | paste -sd' ' -)" ;;
+    remove)
+      [ $# -eq 1 ] || die "usage: brain engine remove <name>"
+      engine_on "$1" || die "$1 is not installed"
+      local users; users="$(roles_conf | awk -v e="$1" '$1 !~ /^#/ && $2 == e { print $1 }' | paste -sd' ' -)"
+      [ -z "$users" ] || die "roles still run on $1: $users — move them to another engine first (roles.conf, or Admin → Roles)"
+      set_setting BRAIN_ENGINES "$(engines_on | grep -vx "$1" | paste -sd' ' -)"
+      info "removed $1. Its image stays until: docker image rm brain-$1:$TPL_VERSION" ;;
+    *) die "usage: brain engine [ls | add <name>… | remove <name>]" ;;
+  esac
+}
+
+# A setting of this brain's own (system/brain.local.conf), from a script: install.sh uses it.
+cmd_config() {
+  case "${1:-}" in
+    get) [ -n "${2:-}" ] || die "usage: brain config get KEY"; setting "$2" "" ;;
+    set) [ -n "${2:-}" ] && [ $# -ge 3 ] || die "usage: brain config set KEY VALUE"; set_setting "$2" "$3" ;;
+    *) die "usage: brain config get KEY | brain config set KEY VALUE" ;;
+  esac
 }
 
 cmd_update() {
@@ -3115,6 +3196,8 @@ cmd_test() {
   down)        shift; cmd_down "$@" ;;
   evolve)      shift; cmd_evolve "$@" ;;
   update)      shift; cmd_update "$@" ;;
+  engine)      shift; cmd_engine "$@" ;;
+  config)      shift; cmd_config "$@" ;;
   secret)      shift; [ "${1:-}" = set ] && [ -n "${2:-}" ] || die "usage: brain secret set <name> [--oauth]   (anthropic, openai, or an app's)"
                shift; sbx secret set "$@" ;;
   eval)        shift; cmd_eval "$@" ;;
