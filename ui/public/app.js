@@ -232,6 +232,8 @@ function dashboard () {
   const head = $('div', 'head')
   head.append($('h1', '', 'Overview'), $('p', 'sub', `${S.playbooks.length} playbooks, ${S.roles.length} roles, ${S.projects.length} projects`))
   box.append(head)
+  const upd = baseUpdateNote(S, () => refreshState(scrollY))
+  if (upd) box.append(upd)
 
   const errs = lintBlock(S.lint, f => f.level === 'error')
   const warns = lintBlock(S.lint, f => f.level === 'warn')
@@ -1329,7 +1331,7 @@ function appsView (name) {
   const refresh = $('button', '', ''); refresh.append(icon('arrows-clockwise'), ' Check for updates'); refresh.disabled = busyStore()
   refresh.title = S.store.catalog ? `${S.store.catalog.source} @ ${S.store.catalog.commit.slice(0, 12)}, checked ${S.store.catalog.at}` : 'Not checked yet'
   refresh.onclick = () => storeAsk({ verb: 'catalog' }, refresh)
-  head.append(titles, refresh); box.append(head, storeStatus())
+  head.append(titles, refresh); box.append(head, baseUpdateNote(S, () => refreshState(scrollY)) || '', storeStatus())
 
   const all = storeApps(), count = { all: all.length, installed: all.filter(a => a.installed).length, available: all.filter(a => !a.installed).length }
   const bar = $('div', 'store-bar'), search = Object.assign(document.createElement('input'), { type: 'search', placeholder: 'Search apps', value: storeQuery })

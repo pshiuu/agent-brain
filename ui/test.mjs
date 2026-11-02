@@ -1129,6 +1129,26 @@ console.log('app settings: secrets and settings from app.conf')
   rmSync(A, { recursive: true }); rmSync(join(FIX, 'system/config'), { recursive: true })
 }
 
+console.log('base update: the banner brain watch feeds, and the Update request')
+{
+  const f = join(FIX, 'memory/.base-update'), r = join(FIX, 'memory/.update-request')
+  it('reads what is to come, and refuses an update with nothing to bring', () => {
+    rmSync(f, { force: true }); rmSync(r, { force: true })
+    assert.equal(b.baseUpdate(), null, 'no file: no banner')
+    writeFileSync(f, '# aaa bbb 2026-11-02 23:40\n')
+    throws(() => b.requestBaseUpdate(), /up to date/)
+    writeFileSync(f, '# aaa bbb 2026-11-02 23:40\n1ca65b6\tbrain app update: settled\tconflicts\ne834b26\tcockpit: no rebuild\n')
+    const u = b.baseUpdate()
+    assert.deepEqual([u.head, u.upstream, u.at, u.requested], ['aaa', 'bbb', '2026-11-02 23:40', false])
+    assert.deepEqual(u.commits.map(c => c.sha), ['1ca65b6', 'e834b26'])
+    assert.equal(u.commits[0].subject, 'brain app update: settled conflicts')
+    b.requestBaseUpdate()
+    assert.equal(readFileSync(r, 'utf8'), 'update\n'); assert.equal(b.baseUpdate().requested, true)
+    assert.equal(b.state().base.commits.length, 2, 'it is in the state the pages draw from')
+    rmSync(f); rmSync(r)
+  })
+}
+
 console.log('apps page: the catalog brain watch writes and the requests it runs')
 {
   const M = f => join(FIX, 'memory', f), A = join(FIX, 'system/apps/kept')

@@ -17,7 +17,7 @@ at this level or above.
   the host, in `bin/brain`. A drafting agent writes to its workspace and the host
   installs the result after the human sees it.
 - **The cockpit never runs a host command.** It stages a request file under `memory/`
-  (`.new/<slug>/`, `<project>/.run-request`, `.draft-request`, `.evolve-request`,
+  (`.new/<slug>/`, `<project>/.run-request`, `.draft-request`, `.evolve-request`, `.update-request`,
   `.commit-request`, `.apps-request`; an app's Studio code `<project>/.<app>-request`, `inbox/` and
   `<name>.staged` through `/api/app-request`) and `brain watch` acts on it, at most
   `BRAIN_MAX_PARALLEL` runs at once. A new kind of button means a new request file and a new `case` in `cmd_watch`,

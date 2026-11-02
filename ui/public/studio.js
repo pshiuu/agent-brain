@@ -164,7 +164,7 @@ function overview () {
     s.append(l, $('b', '', String(n))); stats.append(s)
   }
   const sub = waiting.length ? `${waiting.length} review${waiting.length > 1 ? 's' : ''} only you can do.` : 'Nothing is waiting for you right now.'
-  const parts = [head('Overview', sub), watchingNote(), stats]
+  const parts = [head('Overview', sub), watchingNote(), baseUpdateNote(S, () => refresh().then(() => render())), stats].filter(Boolean)
   if (pend.length) parts.push(startingCard())
   if (waiting.length) parts.push(card('Waiting for you', 'Open one, comment on the text, then approve it or send it back.', null, projectTable(waiting)))
   const adj = adjustments()

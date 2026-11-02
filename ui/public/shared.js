@@ -112,6 +112,27 @@ const readB64 = f => new Promise((ok, no) => {
   r.onerror = () => no(new Error(`could not read ${f.name}`))
   r.readAsDataURL(f)
 })
+/* An update of the brain itself (memory/.base-update, which brain watch refreshes every 6
+   hours and on Check for updates): what it brings, and the button that asks brain watch
+   to run brain update. Null when there is nothing to update. */
+function baseUpdateNote (st, after = () => {}) {
+  const u = st.base
+  if (!u || !u.commits.length) return null
+  const n = $('div', 'note warn base-update'), body = $('div'), list = $('ul')
+  for (const c of u.commits.slice(-8)) list.append($('li', '', c.subject))
+  const more = u.commits.length > 8 ? ` (the last 8 of ${u.commits.length})` : ''
+  body.append($('p', '', `An update of agent-brain is ready: ${u.commits.length} change${u.commits.length > 1 ? 's' : ''}${more}.`), list)
+  const b = $('button', u.requested ? '' : 'primary', u.requested ? 'Update requested' : 'Update')
+  b.disabled = u.requested
+  if (u.requested) body.append($('p', '', st.watching ? 'It starts in a Terminal window as soon as no step is running.' : 'Waiting for brain watch, which is not running.'))
+  b.onclick = async () => {
+    b.disabled = true
+    try { await api('/api/base-update', { method: 'POST', body: {} }); after() } catch (e) { b.disabled = false; body.append($('p', '', e.message)) }
+  }
+  n.append(icon('arrow-circle-up'), body, b)
+  return n
+}
+
 const upload = async (f, where) => api('/api/source', { method: 'POST', body: { name: f.name, data: await readB64(f), ...where } })
 
 /** One field for one input. check() is the message that stops the form, or ''. */

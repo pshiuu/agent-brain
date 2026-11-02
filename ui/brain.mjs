@@ -1730,6 +1730,24 @@ export function appStore () {
   }
 }
 
+/** memory/.base-update, written by brain watch: what the base's upstream has that this
+ *  brain does not, oldest first. The Update button stages .update-request; brain watch
+ *  runs brain update once no phase is running. */
+export function baseUpdate () {
+  const text = read(join(MEM, '.base-update'))
+  if (!text) return null
+  const [, head = '', upstream = '', at = ''] = text.split('\n')[0].match(/^# (\S+) (\S+) (.*)$/) || []
+  const commits = text.split('\n').filter(l => l && !l.startsWith('#')).map(l => {
+    const [sha, ...subject] = l.split('\t'); return { sha, subject: subject.join(' ') }
+  })
+  return { head, upstream, at, commits, requested: existsSync(join(MEM, '.update-request')) }
+}
+export function requestBaseUpdate () {
+  if (!baseUpdate()?.commits.length) throw new HttpError(409, 'the brain is up to date — nothing to update')
+  writeFileSync(join(MEM, '.update-request'), 'update\n')
+  return { ok: true, watching: watching() }
+}
+
 export function requestApps ({ verb, name = '', trust = false, force = false, confirm = '' }) {
   if (existsSync(join(MEM, '.apps-request')) || existsSync(join(MEM, '.apps-running'))) throw new HttpError(409, 'another app change is queued or running — wait for it')
   if (verb === 'catalog') { writeFileSync(join(MEM, '.apps-request'), 'catalog\n'); return { ok: true, watching: watching() } }
@@ -2415,7 +2433,7 @@ export function knowledgeGraph () {
 
 export function state () {
   return {
-    playbooks: playbooks(), apps: apps(), store: appStore(), clientsOn: clientsOn(), roles: roles(), skills: skills(), sandbox: sandbox(), projects: projects(), clients: clients(), archivedClients: archivedClients(), knowledge: knowledge(), proposals: proposals(read(join(MEM, 'proposals.md'))), examples: examples(), sources: sources(), lint: lint(), models: models(), maxFixLoops: MAX_FIX_LOOPS, hostBrain: HOST_BRAIN, hostDev: HOST_DEV, watching: watching(), evolvePending: existsSync(join(MEM, '.evolve-request')),
+    playbooks: playbooks(), apps: apps(), store: appStore(), base: baseUpdate(), clientsOn: clientsOn(), roles: roles(), skills: skills(), sandbox: sandbox(), projects: projects(), clients: clients(), archivedClients: archivedClients(), knowledge: knowledge(), proposals: proposals(read(join(MEM, 'proposals.md'))), examples: examples(), sources: sources(), lint: lint(), models: models(), maxFixLoops: MAX_FIX_LOOPS, hostBrain: HOST_BRAIN, hostDev: HOST_DEV, watching: watching(), evolvePending: existsSync(join(MEM, '.evolve-request')),
     maxParallel: Number(setting('BRAIN_MAX_PARALLEL', 3)) || 0,
     pending: { new: pendingProjects(), drafts: drafts(), draft: (read(join(MEM, '.draft-request')) || '').trim() || null, commit: existsSync(join(MEM, '.commit-request')) }
   }

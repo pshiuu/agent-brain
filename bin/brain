@@ -54,8 +54,9 @@
 #   brain eval list | run <name> | score <project>
 #                                       run a playbook for real on a fixed input (an eval),
 #                                       score it and compare it with the last run
-#   brain update                        the base from upstream: git pull (a merge that keeps
-#                                       this brain's own commits), then ./install.sh again
+#   brain update [--check]              the base from upstream: git pull (a merge that keeps
+#                                       this brain's own commits), then ./install.sh again;
+#                                       --check only lists what it would bring
 #   brain status                        show phase progress for this project
 #   brain lint                          check the memory wiki (index, links, orphans)
 #   brain approve [phase] [--defer ID]  approve a human gate (e.g. the design); open
@@ -2313,8 +2314,20 @@ cmd_watch() {
   info "watching $MEM for cockpit verdicts (ctrl-c to stop), up to $MAX_PARALLEL runs at once"
   # Only one watcher per brain, so a marker left now is from one that died mid-request.
   rm -f "$MEM/.apps-running"; [ -f "$MEM/.apps-request" ] || echo catalog > "$MEM/.apps-request"
+  local checked; checked="$(date +%s)"
   while :; do
     : > "$beat"
+    # Updates of the base and the apps, looked for again every 6 hours.
+    if [ $(( $(date +%s) - checked )) -gt 21600 ]; then
+      checked="$(date +%s)"; [ -f "$MEM/.apps-request" ] || [ -f "$MEM/.apps-running" ] || echo catalog > "$MEM/.apps-request"
+    fi
+    # The cockpit's Update button: brain update in a window of its own, once nothing runs —
+    # it replaces bin/brain and restarts this watcher, so it never runs under a phase.
+    if [ -f "$MEM/.update-request" ] && [ "$(running_projects)" = 0 ] && [ ! -f "$MEM/.apps-running" ]; then
+      rm -f "$MEM/.update-request"
+      info "brain -> update   ($BRAIN)"
+      terminal "$BRAIN" "brain update"
+    fi
     # A lease left by a dead launcher would block its project here forever.
     for dir in "$MEM"/projects/*/; do
       compgen -G "$dir/phases/*.running" >/dev/null && sweep_stale "$(basename "$dir")" "${dir%/}"
@@ -2666,7 +2679,7 @@ apps_do() { # verb name flags -> runs in apps_request's command substitution, so
   case " $3 " in *" trust "*) export BRAIN_TRUST_APP="$name" ;; esac
   case " $3 " in *" force "*) export BRAIN_FORCE=1 ;; esac
   case "$verb" in
-    catalog) app_catalog; return ;;
+    catalog) app_catalog; base_check; return ;;
     install|update|remove|revert) ;;
     *) die "the Studio asked for '$verb', which is not an app command" ;;
   esac
@@ -2994,10 +3007,38 @@ cmd_eval() {
 # stops on a real conflict, the same deal
 # `brain app update` gives an app. memory/ is its own repo and is not touched. git writes a
 # changed file as a new one, so a running bin/brain keeps reading the old.
+# What the base's upstream has that this brain does not: memory/.base-update, read by the
+# cockpit's banner. "# <head> <upstream> <date>", then "<sha>\t<subject>" per commit to come,
+# oldest first. A brain with no upstream writes nothing; a failed fetch keeps the last answer.
+base_check() {
+  local up
+  up="$(git -C "$BRAIN" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)" || { rm -f "$MEM/.base-update"; return 0; }
+  git -C "$BRAIN" fetch -q "${up%%/*}" 2>/dev/null || { info "could not reach the base's upstream (${up%%/*}) — try again later"; return 0; }
+  { printf '# %s %s %s\n' "$(git -C "$BRAIN" rev-parse HEAD)" "$(git -C "$BRAIN" rev-parse '@{u}')" "$(date '+%F %H:%M')"
+    git -C "$BRAIN" log --reverse --format='%h%x09%s' 'HEAD..@{u}'
+  } > "$MEM/.base-update.tmp" && mv "$MEM/.base-update.tmp" "$MEM/.base-update"
+  info "base: $(grep -vc '^#' "$MEM/.base-update") change(s) to come from $up"
+}
+
 cmd_update() {
   git -C "$BRAIN" rev-parse --git-dir >/dev/null 2>&1 || die "$BRAIN is not a git checkout of the base"
-  git -C "$BRAIN" diff --quiet HEAD -- 2>/dev/null || die "the base has uncommitted changes — commit them first: git -C $BRAIN status"
+  if [ "${1:-}" = --check ]; then
+    base_check
+    [ -f "$MEM/.base-update" ] || { info "the base has no upstream to check"; return 0; }
+    if grep -q '^[^#]' "$MEM/.base-update"; then grep -v '^#' "$MEM/.base-update" | sed 's/^/  /'; info "brain update applies them"
+    else info "the base is current"; fi
+    return 0
+  fi
+  [ "$(running_projects)" = 0 ] || die "a phase is running — update when it has finished: the update replaces bin/brain under it"
+  # What brain evolve and the cockpit's Roles page changed in system/ is this brain's own
+  # work: committed, so the pull merges it like any local commit instead of refusing.
+  if [ -n "$(git -C "$BRAIN" status --porcelain -- system)" ]; then
+    git -C "$BRAIN" add system && git -C "$BRAIN" commit -qm "this brain's own changes to system/, before an update" \
+      && info "committed this brain's own changes to system/ first"
+  fi
+  git -C "$BRAIN" diff --quiet HEAD -- 2>/dev/null || die "the base has uncommitted changes outside system/ — commit them first: git -C $BRAIN status"
   git -C "$BRAIN" pull --no-rebase --no-edit || die "the merge stopped: resolve it (git -C $BRAIN status), commit, then run $BRAIN/install.sh"
+  base_check >/dev/null 2>&1 || true
   info "the base is current; applying it (install.sh: templates, skills, the watcher, the cockpit)"
   exec "$BRAIN/install.sh"
 }
@@ -3058,7 +3099,7 @@ cmd_test() {
   up)          shift; cmd_up "$@" ;;
   down)        shift; cmd_down "$@" ;;
   evolve)      shift; cmd_evolve "$@" ;;
-  update)      shift; cmd_update ;;
+  update)      shift; cmd_update "$@" ;;
   eval)        shift; cmd_eval "$@" ;;
   status)      shift; cmd_status ;;
   lint)        shift; cmd_lint ;;
