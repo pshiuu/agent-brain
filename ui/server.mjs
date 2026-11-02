@@ -166,6 +166,10 @@ const routes = {
   'POST /api/inputs': ({ b }) => brain.setInputs(b),
   'GET /api/client-inputs': ({ q }) => brain.clientInputs(q.get('client'), q.get('playbook')),
   'POST /api/client-inputs': ({ b }) => brain.saveClientInputs(b),
+  'POST /api/client-archive': ({ b }) => brain.archiveClient(b.client),
+  'POST /api/client-restore': ({ b }) => brain.restoreClient(b.archived),
+  // For good, so the name is typed: `client` for an active one, `archived` for one in the archive.
+  'DELETE /api/client': ({ b }) => brain.deleteClient(b),
   'DELETE /api/project-pending': ({ b }) => brain.discardPending(b.name),
   'POST /api/run': ({ b }) => brain.startRun(b.project, b.then),
   'POST /api/draft': ({ b }) => brain.requestDraft(b),

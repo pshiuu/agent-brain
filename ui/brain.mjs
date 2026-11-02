@@ -470,6 +470,61 @@ export function saveClientInputs ({ client, playbook, values = {} }) {
   return clientInputs(cl, playbook)
 }
 
+/* Archiving moves a client to memory/archive/clients/<slug>/ — its profile, its pages and
+   its documents, still tracked and still there to read, as `brain app forget` does with
+   knowledge; a second archive of the same slug gets a timestamp. Restoring moves it back.
+   Deleting removes the folder, active or archived, for good. Archiving and deleting an
+   active client are refused while one of its projects is unfinished: those agents read
+   the folder. A finished project keeps CLIENT=<slug> and simply finds no client memory. */
+const CLIENT_ARCHIVE = () => join(MEM, 'archive', 'clients')
+const ARCHIVED_STAMP = /-\d{4}-\d\d-\d\d-\d\d-\d\d-\d\d$/
+function activeClient (client) {
+  const { cl, dir } = clientDir(client)
+  if (!existsSync(dir)) throw new HttpError(404, `no client '${cl}'`)
+  const open = projects().filter(p => p.client === cl && p.next)
+  if (open.length) throw new HttpError(409, `${open.map(p => p.name).join(', ')} ${open.length === 1 ? 'is' : 'are'} still running for this client. Finish or delete ${open.length === 1 ? 'it' : 'them'} first.`)
+  return { cl, dir }
+}
+function archivedClient (name) {
+  if (!clientsOn()) throw new HttpError(404, 'clients are an app: install it from Admin → Apps')
+  const n = String(name || '')
+  const dir = join(CLIENT_ARCHIVE(), n)
+  if (!/^[a-z0-9][a-z0-9-]{0,60}$/.test(n) || !existsSync(dir)) throw new HttpError(404, `no archived client '${n}'`)
+  return { name: n, dir, slug: n.replace(ARCHIVED_STAMP, '') }
+}
+
+export function archivedClients () {
+  if (!clientsOn()) return []
+  return dirs(CLIENT_ARCHIVE()).map(name => ({ name, slug: name.replace(ARCHIVED_STAMP, ''), path: `memory/archive/clients/${name}/profile.md` }))
+}
+
+export function archiveClient (client) {
+  const { cl, dir } = activeClient(client)
+  let dest = join(CLIENT_ARCHIVE(), cl)
+  if (existsSync(dest)) dest = join(CLIENT_ARCHIVE(), `${cl}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}`)
+  mkdirSync(CLIENT_ARCHIVE(), { recursive: true })
+  renameSync(dir, dest)
+  return { archived: basename(dest), path: `memory/archive/clients/${basename(dest)}` }
+}
+
+export function restoreClient (name) {
+  const { dir, slug } = archivedClient(name)
+  const dest = join(MEM, 'clients', slug)
+  if (existsSync(dest)) throw new HttpError(409, `a client '${slug}' exists already — archive or delete it first`)
+  mkdirSync(dirname(dest), { recursive: true })
+  renameSync(dir, dest)
+  return { restored: slug }
+}
+
+/** For good: `archived` names a folder in the archive, otherwise `client` is an active one.
+ *  `confirm` is the client's slug, typed. */
+export function deleteClient ({ client, archived, confirm }) {
+  const { dir, slug } = archived ? archivedClient(archived) : { ...activeClient(client), slug: toSlug(client) }
+  if (confirm !== slug) throw new HttpError(400, `type ${slug} to confirm`)
+  rmSync(dir, { recursive: true, force: true })
+  return { deleted: archived || slug }
+}
+
 // ---------- state ------------------------------------------------------------
 
 export function playbooks () {
@@ -2358,7 +2413,7 @@ export function knowledgeGraph () {
 
 export function state () {
   return {
-    playbooks: playbooks(), apps: apps(), store: appStore(), clientsOn: clientsOn(), roles: roles(), skills: skills(), sandbox: sandbox(), projects: projects(), clients: clients(), knowledge: knowledge(), proposals: proposals(read(join(MEM, 'proposals.md'))), examples: examples(), sources: sources(), lint: lint(), models: models(), maxFixLoops: MAX_FIX_LOOPS, hostBrain: HOST_BRAIN, hostDev: HOST_DEV, watching: watching(), evolvePending: existsSync(join(MEM, '.evolve-request')),
+    playbooks: playbooks(), apps: apps(), store: appStore(), clientsOn: clientsOn(), roles: roles(), skills: skills(), sandbox: sandbox(), projects: projects(), clients: clients(), archivedClients: archivedClients(), knowledge: knowledge(), proposals: proposals(read(join(MEM, 'proposals.md'))), examples: examples(), sources: sources(), lint: lint(), models: models(), maxFixLoops: MAX_FIX_LOOPS, hostBrain: HOST_BRAIN, hostDev: HOST_DEV, watching: watching(), evolvePending: existsSync(join(MEM, '.evolve-request')),
     maxParallel: Number(setting('BRAIN_MAX_PARALLEL', 3)) || 0,
     pending: { new: pendingProjects(), drafts: drafts(), draft: (read(join(MEM, '.draft-request')) || '').trim() || null, commit: existsSync(join(MEM, '.commit-request')) }
   }
