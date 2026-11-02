@@ -22,8 +22,4 @@ services:
       # Codex, install.sh points CODEX_MODELS at an empty one — a missing source would
       # make Docker create a folder where Codex later wants to write this file.
       - ${CODEX_MODELS:-${CODEX_HOME:-${HOME}/.codex}/models_cache.json}:/codex-models.json:ro
-      # The UI is copied into the image at build time, so edits to ui/ need
-      # `docker compose up -d --build`. Uncomment to serve it from disk instead
-      # and a plain `docker compose restart` picks changes up.
-      # - ./ui:/app:ro
     restart: unless-stopped

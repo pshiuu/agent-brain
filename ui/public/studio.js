@@ -793,9 +793,13 @@ function live () {
       fresh.onclick = async () => { fresh.remove(); fresh = null; await refresh(); render({ keepScroll: scrollY }) }
       document.body.append(fresh); return
     }
+    // An app's ui/main.js was imported once; a module cannot be imported again, so a new,
+    // updated or removed app reloads the page to load its code as it now is.
+    if (appCode(next) !== appCode(S)) return location.reload()
     S = next; render({ keepScroll: scrollY })
   }
 }
+const appCode = st => JSON.stringify(st.apps.filter(a => a.main).map(a => [a.name, a.lock?.commit]))
 
 addEventListener('hashchange', () => { if (fresh) { fresh.remove(); fresh = null } render() })
 view.append($('div', 'skel'), $('div', 'skel'), $('div', 'skel'))

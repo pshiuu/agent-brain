@@ -1002,9 +1002,12 @@ roles, skills, human gates and QA screenshots.
 
 ```bash
 docker compose up -d            # http://127.0.0.1:7777 (COCKPIT_PORT in .env)
-docker compose up -d --build    # after changing anything in ui/
 docker compose down
 ```
+
+The image is only node: the cockpit runs from `ui/` in the mounted brain, so an edit to
+`ui/`, `brain update` or an app's Studio code needs no rebuild. The server restarts itself
+when `server.mjs` or `brain.mjs` change, and an open Studio reloads when an app changes.
 
 It bind-mounts the brain read-write and `~/dev` read-only, and binds to loopback only.
 It deliberately cannot call `brain` or `sbx` (those are host binaries), so running a
