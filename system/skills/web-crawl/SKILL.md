@@ -15,10 +15,12 @@ brain-crawl --sitemap https://old-site.example/sitemap.xml
 
 One file per URL under `crawl/`, named for the URL, so a re-crawl overwrites rather
 than piling up. A page it could not extract is reported `✗` and no file is written —
-an empty file would read as an empty page.
+an empty file would read as an empty page. Under the `✗` it prints the crawler's own
+reason, so read that before concluding the sites blocked you.
 
-First run installs crawl4ai (~20s, ~730 MB). It is deliberately not in the template
-image: most projects never crawl. It reuses the Chromium already in the sandbox.
+First run installs crawl4ai (~20s, ~730 MB) and the Chromium headless shell its
+Playwright pins — a different build from the image's, and without it every URL comes
+back `✗`. It is deliberately not in the template image: most projects never crawl.
 
 ## When to reach for it
 

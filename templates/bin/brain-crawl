@@ -5,8 +5,7 @@
 #   brain-crawl --sitemap <sitemap-url>  every <loc> in the sitemap
 #
 # Not in the template image on purpose: crawl4ai is ~730 MB, mostly scipy, litellm and
-# a second Playwright, and most projects never crawl anything. It reuses the Chromium
-# the image already has, so nothing downloads a browser again.
+# a second Playwright, and most projects never crawl anything.
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 out="${BRAIN_CRAWL_OUT:-crawl}"
@@ -14,6 +13,18 @@ out="${BRAIN_CRAWL_OUT:-crawl}"
 command -v crwl >/dev/null || {
   echo "▸ installing crawl4ai (one time, ~20s)" >&2
   uv tool install crawl4ai >/dev/null
+}
+
+# crawl4ai brings its own Playwright, pinned to a newer Chromium headless shell than the
+# template image ships (it wanted -1248 where the image has -1243). Without that exact
+# build every page comes back "nothing extracted", so install it with crawl4ai's own
+# playwright, not the image's. Already there: a no-op, so this runs on every crawl and
+# also repairs a crawl4ai installed before this check existed.
+pw=("$(uv tool dir)/crawl4ai/bin/playwright")
+[ -x "${pw[0]}" ] || pw=(uv tool run --from crawl4ai playwright)
+"${pw[@]}" install chromium-headless-shell >&2 || {
+  echo "✗ could not install the Chromium headless shell crawl4ai needs — see above" >&2
+  exit 1
 }
 
 urls=()
@@ -29,14 +40,17 @@ else
 fi
 
 mkdir -p "$out"
+err="$(mktemp)"; trap 'rm -f "$err"' EXIT
 for u in "${urls[@]}"; do
   # One file per URL, named for its path, so a re-crawl overwrites rather than piles up.
   name="$(printf '%s' "$u" | sed 's|https\{0,1\}://||; s|/$||; s|[^A-Za-z0-9._-]|_|g')"
-  if crwl "$u" -o markdown > "$out/$name.md" 2>/dev/null && [ -s "$out/$name.md" ]; then
+  if crwl "$u" -o markdown > "$out/$name.md" 2>"$err" && [ -s "$out/$name.md" ]; then
     printf '  ✓ %-60s %s lines\n' "$u" "$(wc -l < "$out/$name.md" | tr -d ' ')"
   else
     rm -f "$out/$name.md"
     printf '  ✗ %-60s nothing extracted\n' "$u"
+    # crwl's own reason, which a thrown-away stderr turns into "every site blocked us".
+    tail -5 "$err" | sed 's/^/      /' >&2
   fi
 done
 echo "▸ markdown in $out/ — cite the file, never a page you did not crawl" >&2
