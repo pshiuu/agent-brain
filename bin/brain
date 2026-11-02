@@ -646,7 +646,7 @@ EOF
 
 cmd_init() {
   command -v sbx >/dev/null || die "sbx not found"
-  command -v docker >/dev/null || die "docker not found (building templates needs Docker Desktop, see README)"
+  command -v docker >/dev/null || die "docker not found (building templates needs Docker Desktop, see docs/setup.md)"
   local engine img tar
   for engine in claude codex; do
     img="brain-$engine:$TPL_VERSION"

@@ -10,7 +10,7 @@ at this level or above.
 ## Read first
 - `system/BRAIN.md` — how every agent in this system operates. It is the contract the
   roles and playbooks are written against.
-- `README.md` — what each command does and every flag it takes.
+- `README.md` and `docs/` — what the brain is, every command and flag (`docs/commands.md`), and how each part works.
 
 ## What must stay true
 - **`system/` is read-only to sandboxed agents.** Anything that writes there runs on

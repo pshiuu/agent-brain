@@ -1211,7 +1211,7 @@ function playbookDir (name) {
 export const playbookRel = name => relOf(playbookDir(name))
 
 /** Create a playbook, either as a working skeleton or as a copy of an existing one.
- *  Copying is what the README already tells you to do by hand, and it is the common
+ *  Copying is what docs/playbooks.md already tells you to do by hand, and it is the common
  *  case: most playbooks are a variation on one you already have. */
 export function createPlaybook ({ name, description = '', from = '' }) {
   const dir = playbookDir(name)

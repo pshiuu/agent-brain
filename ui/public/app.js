@@ -454,7 +454,7 @@ function projectMemoryBlock (p) {
   return box
 }
 
-/* Most new playbooks are a variation on one you already have, which is what the README
+/* Most new playbooks are a variation on one you already have, which is what docs/playbooks.md
    tells you to do by hand: copy a folder and edit it. */
 function newPlaybookForm () {
   const box = $('div')
