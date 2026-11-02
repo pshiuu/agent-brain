@@ -149,12 +149,15 @@ the same as no wiki.
   ```
   ## Defects
   - qa.slug-rename-links OPEN code — nav stays on /faq after a rename — escaped: code-review
-  - qa.mobile-320 VERIFIED
+  - qa.mobile-320 VERIFIED code — h1 clipped at 320 on /tarife — escaped: design-review
   ```
   - The id is `<this phase>.<slug>`, lowercase, and stays the same for as long as the
     finding exists; the numbered item that describes it names the id too.
   - The state is `OPEN` (still wrong), `VERIFIED` (was open, you checked it is fixed),
-    `WAIVED` or `DEFERRED` (a human decided; keep them as they are).
+    `WAIVED` or `DEFERRED` (a human decided; keep them as they are). Only the state
+    changes between rounds: the line keeps the description and the `escaped:` it was
+    opened with. Each round overwrites the summary, so a bare `VERIFIED` erases the
+    escape it was counted by.
   - `escaped: <phase>` names the earlier phase that should have caught it, when one
     should have. Retro counts these.
 - The host checks the block after you exit. FAIL needs at least one `OPEN`, PASS needs
@@ -191,4 +194,7 @@ ids like `design-gate.r2-1`. Answer each one the same way.
   is the single line of description in your skill list — not the skill. Every run
   records which skills were invoked, so "took direction from X" without a call to X is
   visible after the fact. If a skill named in your role is wrong for the work, say so
-  in your summary instead of quietly skipping it.
+  in your summary instead of quietly skipping it. If the Skill tool answers
+  `Unknown skill`, read its `SKILL.md` under `$BRAIN_SYSTEM/skills/<name>/` or
+  `$BRAIN_SYSTEM/apps/*/skills/<name>/` instead, and say so in your summary: the
+  skill is in the brain but not synced into the engine (`brain sync-skills` fixes it).

@@ -1357,7 +1357,7 @@ function appsView (name) {
 function appCard (a) {
   const c = $('a', 'store-card'); c.href = `#/apps/${a.name}`
   const top = $('div', 'store-card-top'), t = $('div')
-  t.append($('div', 'store-name', a.label), $('div', 'store-ver', `v${a.version}${a.installed ? ' · installed' : ''}`))
+  t.append($('div', 'store-name', a.label), $('div', 'store-ver', [`v${a.version}`, a.installed?.lock?.commit.slice(0, 7), a.installed && 'installed'].filter(Boolean).join(' · ')))
   top.append(appTile(a.name, a.icon), t)
   c.append(top, $('p', 'store-desc', a.desc || 'No description.'))
   const foot = $('div', 'store-card-foot'), tags = $('div', 'store-tags')
