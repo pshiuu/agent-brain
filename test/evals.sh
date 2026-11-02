@@ -9,7 +9,7 @@ source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 REPO="$BRAIN"
 fake_brain
 # cmd_approve writes a host record through bin/run-record.sh under $BRAIN: a throwaway one.
-BRAIN="$T"; mkdir -p "$BRAIN/bin"; cp "$REPO/bin/run-record.sh" "$REPO/bin/phase-contract.sh" "$BRAIN/bin/"
+BRAIN="$T"; mkdir -p "$BRAIN/bin" "$BRAIN/templates"; cp "$REPO/bin/run-record.sh" "$REPO/bin/phase-contract.sh" "$BRAIN/bin/"; cp "$REPO/templates/VERSION" "$BRAIN/templates/"
 printf 'writer  claude  default\n' >> "$SYS/roles.conf"; printf '# Role: writer\n' > "$SYS/roles/writer.md"
 mkdir -p "$SYS/playbooks/note"
 printf 'draft  writer\ngate  human  writer\nfinish  writer\n' > "$SYS/playbooks/note/phases"
