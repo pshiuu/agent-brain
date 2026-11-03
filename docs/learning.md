@@ -64,12 +64,14 @@ brain playbook analyse redesign-website
 ```
 
 - **The host counts.** One scorecard per project that ran the playbook, one row per
-  phase: agent runs and minutes, FAIL rounds (a human rejection is one too), findings
+  phase: agent runs, minutes and dollars, FAIL rounds (a human rejection is one too), findings
   a later phase raised with `escaped: <phase>`, what shipped open / waived / deferred,
   and attempts the host rejected (timed out, crashed, failed verification). `—` means
   the project is older than that record, not zero. These come from files an agent
   cannot all see, and the same arithmetic scores every run, so the next run's card
-  says whether the last change helped.
+  says whether the last change helped. Dollars are each run's tokens at the API list
+  prices in `system/prices.conf` — on a subscription, what the same work would cost on
+  the API. A model with no price there shows `?`, and a sum it is missing from shows `≥`.
 - **The `playbook-analyst` judges**, with `system/` read-only as in any phase. It
   traces the most expensive rework to the phase that owns the cause, not the review
   that noticed it. It checks each past edit in `memory/system-edits.md` against the
@@ -116,8 +118,8 @@ An eval is a folder `evals/<name>/` in the base or an app: `eval.conf` names the
 `brief.md` is the project's whole brief, `sources/` the files it cites, and `check.sh` the
 rubric, one `pass <what>` or `fail <what>` line per check (the seo app's runs its article
 checks one by one and `brain-mem check` after the retro). The report goes to
-`memory/evals/<name>/<project>.md`: the scorecard per phase (agent runs, minutes, FAIL
-rounds, findings let through), the checks, and the totals next to the last run's, which
+`memory/evals/<name>/<project>.md`: the scorecard per phase (agent runs, minutes, dollars,
+FAIL rounds, findings let through), the checks, and the totals next to the last run's, which
 `results.tsv` keeps one line per run with the base and app commits it ran on. Run evals in
 `agent-brain-main`, never in the brain you work in: each run is a real project whose retro
 writes to that brain's memory. They are never part of `brain test`.

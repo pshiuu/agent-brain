@@ -50,11 +50,12 @@ has "$(cat "$MEM/projects/$p/brief.md")" "Why cats sleep" "the fixture's brief r
 yes "its sources came along" test -f "$MEM/projects/$p/sources/notes.txt"
 yes "the gate was approved by the runner" test -f "$MEM/projects/$p/phases/gate.done"
 yes "and the playbook ran to the end" test -f "$MEM/projects/$p/phases/finish.done"
-has "$out" "Phases done 3 of 3 · agent runs 2 · minutes 4 · FAIL rounds 0 · checks passed 2 of 3." "the totals"
+has "$out" "Phases done 3 of 3 · agent runs 2 · minutes 4 · dollars ? · FAIL rounds 0 · checks passed 2 of 3." "the totals"
 has "$out" "First run of this eval" "nothing to compare with yet"
 has "$out" "- fail the flag is set" "a failed check is named"
 yes "the report is kept" test -f "$MEM/evals/short-note/$p.md"
 is "$(tail -n +2 "$MEM/evals/short-note/results.tsv" | wc -l | tr -d ' ')" "1" "one results line"
+is "$(head -1 "$MEM/evals/short-note/results.tsv" | awk -F'\t' '{ print $NF }')" "dollars" "results.tsv keeps the cost"
 
 section "the next run is compared with the last"
 touch "$MEM/flag"; sleep 1

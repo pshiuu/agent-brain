@@ -148,10 +148,19 @@ lint_memory() { # prints findings, one per line, prefixed err|note
   # citation only helps while the file it names is there. Project memory is local and
   # gitignored, so on a fresh clone every projects/ citation is missing — a note, not an
   # error. Globs and placeholders (qa/*.png, <phase>) name no one file and are skipped.
-  local cite
+  # Staleness: the newest date under ## Sources is when a run last confirmed the page
+  # (BRAIN.md: a run that confirms a claim adds its record, dated). Counted in months:
+  # bash 3.2 and BSD date have no portable date arithmetic, and a page is not stale by a week.
+  local cite now last
+  now="$(date +%Y-%m)"; now=$(( ${now%-*} * 12 + 10#${now#*-} ))
   for f in "$k"/*.md; do
     [ -e "$f" ] || continue
-    grep -q '^## Sources[[:space:]]*$' "$f" || echo "err  knowledge/$(basename "$f") has no '## Sources' section — say which records its claims come from"
+    last="$(brief_body '## Sources' "$f" | grep -oE '20[0-9]{2}-[01][0-9]-[0-3][0-9]' | sort | tail -1 || true)"
+    if ! grep -q '^## Sources[[:space:]]*$' "$f"; then echo "err  knowledge/$(basename "$f") has no '## Sources' section — say which records its claims come from"
+    elif [ -z "$last" ]; then echo "note knowledge/$(basename "$f") has no dated source under ## Sources — nobody can tell when it was last confirmed"
+    elif [ $(( now - ${last%%-*} * 12 - 10#$(echo "$last" | cut -d- -f2) )) -gt 6 ]; then
+      echo "note knowledge/$(basename "$f") was last confirmed $last — check it still holds, then add the record that confirms it under ## Sources"
+    fi
     grep -oE '(projects|sources)/[A-Za-z0-9._/-]+' "$f" | sed 's/[.]*$//' | sort -u | while read -r cite; do
       [ -e "$MEM/$cite" ] || echo "note knowledge/$(basename "$f") cites $cite, which is not here"
     done

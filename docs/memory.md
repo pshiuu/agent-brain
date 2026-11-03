@@ -23,7 +23,8 @@ brain lint      # pages missing from the index, index links that point nowhere,
                 # pages with no tags: line or under the wrong ### of the index, a tag
                 # no app and no stack names, a page about one client (move it there),
                 # proposals under no heading, sources nobody compiled — and a
-                # brain-wide source only one project cites, which is that client's
+                # brain-wide source only one project cites, which is that client's,
+                # and a page with no source dated in the last six months (stale)
 ```
 
 `brain` runs the same check after every phase and warns if a page and the index
@@ -54,6 +55,11 @@ Not the part that gets read. `index.md` is what every session loads; the pages u
 are opened on demand, and a retro *rewrites* a page rather than appending to it, so 20
 projects worth of lessons about one topic stay one page. `brain lint` warns when a page passes
 250 lines (it has turned back into a log — split it) or the index passes 150.
+
+Nor does it rot quietly. A claim new evidence contradicts is rewritten, and the old one
+stays under it as `Replaced: "<old claim>", <date>, because <record>` — git has the diff,
+but agents read the page, not the history. A run that confirms a claim adds its record,
+dated, under `## Sources`, so the newest date there is when the page was last confirmed.
 
 Nor does every agent read all of it. Each page carries a `tags:` line (`seo`,
 `web, payload`, `shared`) and sits in the index under the `###` heading of its tags. A

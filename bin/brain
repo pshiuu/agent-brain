@@ -1301,20 +1301,36 @@ playbook_in_flight() { # playbook -> the projects partway through it: a phase do
   done < <(playbook_projects "$1")
 }
 
+# A receipt is jq's pretty JSON; squeezed to one line per file, awk can pick its fields.
+# Prices are system/prices.conf. A run on a model that has no line there adds nothing and
+# turns the sum into a floor, "≥", rather than passing for the whole cost; "?" when none is priced.
+runs_usd() { # receipt.json... -> what they cost in dollars, at API list prices
+  local f; for f; do tr -d ' \n' < "$f"; echo; done | awk -v P="$SYS/prices.conf" '
+    BEGIN { while ((getline l < P) > 0) if (split(l, c) >= 5 && c[1] !~ /^#/) { i[c[1]] = c[2]; o[c[1]] = c[3]; r[c[1]] = c[4]; w[c[1]] = c[5] } }
+    function n(k,  v) { if (!match($0, "\"" k "\":[0-9]+")) return 0; v = substr($0, RSTART, RLENGTH); sub(/.*:/, "", v); return v + 0 }
+    {
+      m = match($0, /"model":"[^"]*"/) ? substr($0, RSTART + 9, RLENGTH - 10) : ""
+      if (!(m in i)) { short = 1; next }
+      s += (n("input") * i[m] + n("output") * o[m] + n("cache_read") * r[m] + n("cache_write") * w[m]) / 1000000
+    }
+    END { if (short && s == 0) printf "?"; else printf (short ? "≥$%.2f" : "$%.2f"), s }'
+}
+
 scorecard() { # project playbook -> a markdown table, one row per phase
   local project="$1" pdir="$MEM/projects/$1" phase role runs mins fails through shipped failed f
-  local rj rr blocks=0
+  local rj rr usd all=() blocks=0
   # "—" is "not recorded", never zero: a project older than a record format has none of
   # it, and a zero there would read as a phase that did nothing wrong.
   for f in "$pdir"/phases/*.md; do defects_has "$f" && blocks=1; done
   echo "### $project"
-  echo "| phase | role | agent runs | minutes | FAIL rounds | findings it let through | shipped open / waived / deferred | attempts the host rejected |"
-  echo "|---|---|---|---|---|---|---|---|"
+  echo "| phase | role | agent runs | minutes | dollars | FAIL rounds | findings it let through | shipped open / waived / deferred | attempts the host rejected |"
+  echo "|---|---|---|---|---|---|---|---|---|"
   while read -r phase role _; do
-    rj=("$pdir/phases/$phase.runs"/*.json); runs="—"; mins="—"
+    rj=("$pdir/phases/$phase.runs"/*.json); runs="—"; mins="—"; usd="—"
     if [ -e "${rj[0]}" ]; then
-      runs=${#rj[@]}
+      runs=${#rj[@]}; all+=("${rj[@]}")
       mins="$(grep -ho '"seconds": *[0-9]*' "${rj[@]}" | awk -F: '{ s += $2 } END { printf "%d", s / 60 }')"
+      usd="$(runs_usd "${rj[@]}")"
     fi
     fails="$(fail_rounds "$pdir/phases/$phase.log")"
     # A finding a later phase raised that names this one as where it should have been
@@ -1331,8 +1347,9 @@ scorecard() { # project playbook -> a markdown table, one row per phase
     rr=("$BRAIN/.runs/$project/$phase"/*/result.json); failed="—"
     [ -e "${rr[0]}" ] && failed="$(grep -ho '"outcome":"[a-z_]*"' "${rr[@]}" \
       | grep -cvE '"(handoff_valid|verified|approved|rejected|reopened)"' || true)"
-    echo "| $phase | $role | $runs | $mins | $fails | $through | $shipped | $failed |"
+    echo "| $phase | $role | $runs | $mins | $usd | $fails | $through | $shipped | $failed |"
   done < <(awk '$1 !~ /^#/ && NF >= 2' "$(playbook_dir "$2")/phases")
+  [ ${#all[@]} -eq 0 ] || echo "Total: $(runs_usd "${all[@]}") at API list prices (system/prices.conf)."
 }
 
 # `brain playbook analyse <name>`, step one of making a playbook's next run better than
@@ -3003,13 +3020,14 @@ eval_run() { # name
 }
 
 eval_score() { # project [brain auto's exit code] -> the report, and a results.tsv line
-  local project="${1:-}" rc="${2:--}" pdir name pb d card checks="" pass=0 total=0 runs mins fails done_n all_n prev out app brainv appv e
+  local project="${1:-}" rc="${2:--}" pdir name pb d card checks="" pass=0 total=0 runs mins usd fails done_n all_n prev out app brainv appv e
   [ -n "$project" ] || die "usage: brain eval score <project>"
   pdir="$MEM/projects/$project"
   name="$(eval_field EVAL "$pdir/project.env")"; [ -n "$name" ] || die "'$project' is not an eval run"
   pb="$(eval_field PLAYBOOK "$pdir/project.env")"; d="$(eval_dir "$name")"
   card="$(scorecard "$project" "$pb")"
-  read -r runs mins fails < <(printf '%s\n' "$card" | awk -F'|' 'NR > 3 { r += $4; m += $5; f += $6 } END { printf "%d %d %d\n", r, m, f }')
+  read -r runs mins fails < <(printf '%s\n' "$card" | awk -F'|' 'NR > 3 && /^\|/ { r += $4; m += $5; f += $7 } END { printf "%d %d %d\n", r, m, f }')
+  usd="$(printf '%s\n' "$card" | awk '/^Total: / { print $2 }')"; usd="${usd:--}"
   all_n="$(awk '$1 !~ /^#/ && NF >= 2' "$(playbook_dir "$pb")/phases" | wc -l | tr -d ' ')"
   done_n=0; for e in "$pdir"/phases/*.done; do [ -e "$e" ] && done_n=$((done_n + 1)); done
   if [ -f "$d/check.sh" ]; then
@@ -3020,17 +3038,19 @@ eval_score() { # project [brain auto's exit code] -> the report, and a results.t
   brainv="$(git -C "$BRAIN" rev-parse --short HEAD 2>/dev/null || echo -)"
   appv="$( [ -z "$app" ] || awk -v n="$app" '$1 == n { print substr($3, 1, 7) }' "$SYS/apps.lock" 2>/dev/null || true)"
   out="$MEM/evals/$name"; mkdir -p "$out"
-  [ -f "$out/results.tsv" ] || printf 'date\tproject\tauto exit\tphases done\tagent runs\tminutes\tFAIL rounds\tchecks passed\tchecks\tbase\tapp\n' > "$out/results.tsv"
+  [ -f "$out/results.tsv" ] || printf 'date\tproject\tauto exit\tphases done\tagent runs\tminutes\tFAIL rounds\tchecks passed\tchecks\tbase\tapp\tdollars\n' > "$out/results.tsv"
+  # dollars came last, after results.tsv files existed: their header gains the column.
+  if ! head -1 "$out/results.tsv" | grep -q 'dollars$'; then sed -i.bak '1s/$/\tdollars/' "$out/results.tsv"; rm -f "$out/results.tsv.bak"; fi
   prev="$(tail -n +2 "$out/results.tsv" | awk -F'\t' -v p="$project" '$2 != p' | tail -1)"
-  printf '%s\t%s\t%s\t%s/%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date '+%F %H:%M')" "$project" "$rc" "$done_n" "$all_n" "$runs" "$mins" "$fails" "$pass" "$total" "$brainv" "${appv:--}" >> "$out/results.tsv"
+  printf '%s\t%s\t%s\t%s/%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date '+%F %H:%M')" "$project" "$rc" "$done_n" "$all_n" "$runs" "$mins" "$fails" "$pass" "$total" "$brainv" "${appv:--}" "$usd" >> "$out/results.tsv"
   {
     echo "# Eval $name: $project"
     echo
     echo "Playbook $pb, base $brainv${app:+, app $app ${appv:--}}. brain auto exit: $rc (0 complete, 2 a phase came back not done, 3 a ceiling)."
-    echo "Phases done $done_n of $all_n · agent runs $runs · minutes $mins · FAIL rounds $fails · checks passed $pass of $total."
+    echo "Phases done $done_n of $all_n · agent runs $runs · minutes $mins · dollars $usd · FAIL rounds $fails · checks passed $pass of $total."
     if [ -n "$prev" ]; then
-      printf '%s\n' "$prev" | awk -F'\t' -v r="$runs" -v m="$mins" -v f="$fails" -v p="$pass" -v t="$total" -v dn="$done_n/$all_n" \
-        '{ printf "Last run (%s, %s): phases %s -> %s · runs %s -> %s · minutes %s -> %s · FAIL rounds %s -> %s · checks %s/%s -> %s/%s.\n", $2, $1, $4, dn, $5, r, $6, m, $7, f, $8, $9, p, t }'
+      printf '%s\n' "$prev" | awk -F'\t' -v r="$runs" -v m="$mins" -v f="$fails" -v p="$pass" -v t="$total" -v dn="$done_n/$all_n" -v u="$usd" \
+        '{ printf "Last run (%s, %s): phases %s -> %s · runs %s -> %s · minutes %s -> %s · dollars %s -> %s · FAIL rounds %s -> %s · checks %s/%s -> %s/%s.\n", $2, $1, $4, dn, $5, r, $6, m, ($12 == "" ? "-" : $12), u, $7, f, $8, $9, p, t }'
     else echo "First run of this eval: nothing to compare with yet."; fi
     echo; echo "## Scorecard"; printf '%s\n' "$card" | tail -n +2
     if [ -n "$checks" ]; then echo; echo "## Checks"; printf '%s\n' "$checks" | sed 's/^/- /'; fi

@@ -198,6 +198,16 @@ case "$out" in *"err  knowledge/p.md has no '## Sources'"*) ok ;; *) bad "missin
 case "$out" in *"note knowledge/p.md cites projects/acme/phases/gone.md"*) ok ;; *) bad "missing citation not noted: $out" ;; esac
 case "$out" in *"Acme_Brandbook.pdf is cited only by project acme"*) ok ;; *) bad "single-project source not noted: $out" ;; esac
 
+section "lint — staleness"
+printf '# Index\n- [p](knowledge/p.md)\n- [old](knowledge/old.md)\n- [new](knowledge/new.md)\n' > "$MEM/index.md"
+printf '# Old\nOne line.\n\n## Sources\n- projects/acme/phases/brand.md (2020-01-05)\n- sources/x.pdf (2021-03-02)\n' > "$MEM/knowledge/old.md"
+printf '# New\nOne line.\n\n## Sources\n- projects/acme/phases/brand.md (2020-01-05)\n- projects/acme/phases/brand.md (%s)\n' "$(date +%Y-%m-%d)" > "$MEM/knowledge/new.md"
+out="$(lint_memory)"
+case "$out" in *"note knowledge/old.md was last confirmed 2021-03-02"*) ok ;; *) bad "stale page not noted by its newest source date: $out" ;; esac
+case "$out" in *"knowledge/new.md was last confirmed"*) bad "a page confirmed today noted as stale: $out" ;; *) ok ;; esac
+printf '# P\nOne line.\n\n## Sources\n- projects/acme/phases/brand.md\n' > "$MEM/knowledge/p.md"
+case "$(lint_memory)" in *"note knowledge/p.md has no dated source"*) ok ;; *) bad "undated page not noted" ;; esac
+
 section "scorecard — how a playbook ran, counted from the record"
 MEM="$T/scmem"; P="$MEM/projects/acme/phases"
 mkdir -p "$P/two.runs" "$SYS/playbooks/book" "$BRAIN/.runs/acme/two/r1" "$BRAIN/.runs/acme/two/r2" "$MEM/projects/fresh"
@@ -205,18 +215,21 @@ printf '# phase role fix\none alpha\ntwo rev alpha\n' > "$SYS/playbooks/book/pha
 printf 'PLAYBOOK=book\nCREATED=2026-09-01\n' > "$MEM/projects/acme/project.env"
 printf 'PLAYBOOK=book\nCREATED=2026-09-20\n' > "$MEM/projects/fresh/project.env"   # never ran a phase
 touch "$P/one.done"
-printf '{\n  "seconds": 1800,\n  "turns": 3\n}\n' > "$P/two.runs/a.json"   # brain-runlog's pretty jq
+printf '{\n  "model": "m1",\n  "seconds": 1800,\n  "turns": 3,\n  "tokens": {\n    "input": 1000000,\n    "output": 100000,\n    "cache_read": 2000000,\n    "cache_write": 0\n  }\n}\n' > "$P/two.runs/a.json"   # brain-runlog's pretty jq
 printf '{"seconds":1200}\n' > "$P/two.runs/b.json"
+printf 'm1 4.00 20.00 0.20 5.00\n' > "$SYS/prices.conf"
 printf '2026-09-01 FAIL\n2026-09-02 FAIL\n2026-09-03 PASS\n' > "$P/two.log"
 printf 'RESULT: PASS\n\n## Defects\n- two.a WAIVED code — x — escaped: one\n- two.b DEFERRED code — y — escaped: one\n' > "$P/two.md"
 printf 'RESULT: FAIL\n\n## Defects\n- two.a OPEN code — x — escaped: one\n' > "$P/three.md"
 printf '{"host_verdict":{"outcome":"timed_out"}}' > "$BRAIN/.runs/acme/two/r1/result.json"
 printf '{"host_verdict":{"outcome":"verified"}}' > "$BRAIN/.runs/acme/two/r2/result.json"
 out="$(scorecard acme book)"
-is "$(printf '%s\n' "$out" | grep '^| one ')" "| one | alpha | — | — | 0 | 2 | — | — |" \
+is "$(printf '%s\n' "$out" | grep '^| one ')" "| one | alpha | — | — | — | 0 | 2 | — | — |" \
   "unrecorded runs are '—', and a finding carried in two summaries is let through once"
-is "$(printf '%s\n' "$out" | grep '^| two ')" "| two | rev | 2 | 50 | 2 | 0 | 0 / 1 / 1 | 1 |" \
-  "runs, minutes, FAIL rounds, what shipped, and only the attempt that did not hand off"
+is "$(printf '%s\n' "$out" | grep '^| two ')" "| two | rev | 2 | 50 | ≥\$6.40 | 2 | 0 | 0 / 1 / 1 | 1 |" \
+  "runs, minutes, dollars (a receipt with no priced model makes it a floor), FAIL rounds, what shipped, and only the attempt that did not hand off"
+is "$(runs_usd "$P/two.runs/a.json")" "\$6.40" "4 in + 2 out + 0.40 cache read"
+is "$(runs_usd "$P/two.runs/b.json")" "?" "no priced run: unknown, not \$0"
 is "$(playbook_projects book)" "acme" "a project that never finished a phase has no run to learn from"
 
 section "playbook analyse — the analyst gets the numbers, and only files proposals"
@@ -226,7 +239,7 @@ printf '# P\n\n## Accepted\n\n## Open\n- [system/roles/alpha.md] old (acme, 2026
   # The analyst files one proposal, and only if the scorecard reached its prompt.
   launch() {
     [ "$5" = playbook-analyst ] || return 0
-    case "$4" in *"| two | rev | 2 | 50 | 2 |"*) printf -- '- [system/playbooks/book/playbook.md] new (acme, 2026-09-23)\n' >> "$MEM/proposals.md" ;; esac
+    case "$4" in *"| two | rev | 2 | 50 | ≥\$6.40 | 2 |"*) printf -- '- [system/playbooks/book/playbook.md] new (acme, 2026-09-23)\n' >> "$MEM/proposals.md" ;; esac
   }
   drop_draft_sandbox() { :; }; commit_memory() { :; }
   cmd_evolve() { echo "EVOLVE RAN"; }

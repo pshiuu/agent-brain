@@ -16,7 +16,9 @@ Do:
    with a FAIL round or a `## Defects` block, the gate feedback from the human,
    `decisions.md`, and `phases/retro.md` if the playbook has one.
 3. Find the rework. Rank phases by what they cost beyond their first pass: FAIL rounds,
-   findings let through, attempts the host rejected, minutes. For each of the top
+   findings let through, attempts the host rejected, dollars, minutes. A FAIL round
+   is paid for by the dollars of the runs after the first, so "most expensive rework"
+   is the phase whose re-runs cost the most, not the one with the most rounds. For each of the top
    three, trace it to the phase that **owns** the cause — the one whose output was
    missing or wrong, not the review that noticed it. `findings it let through` points
    there directly: it counts findings a later phase raised with `escaped: <phase>`.
@@ -26,7 +28,7 @@ Do:
    the outcome is a candidate for rewriting as a check, or for deletion.
 5. Rewrite `knowledge/playbook-<name>.md` — rewrite, not append. The first prose line
    says what the page settles. Then: the scorecard totals, one row per project (date,
-   FAIL rounds, findings let through, host-rejected attempts, hours, what shipped open
+   FAIL rounds, findings let through, host-rejected attempts, hours, dollars, what shipped open
    or waived); the recurring failure modes, ranked; what past edits fixed and what
    they did not; `## Sources` citing each project's `phases/*.md` you drew on. List it
    in `index.md`. Agents on this playbook read it at the start of their phase, so it

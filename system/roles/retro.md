@@ -9,7 +9,8 @@ Do:
    one is a place where one phase did not give the next what it needed.
 2. Follow the "Keeping the wiki" rules in `BRAIN.md`: one topic per page, update the
    page that exists before creating a new one, rewrite a claim that new evidence
-   contradicts, cross-link with `[[page-name]]`, and cite the raw record
+   contradicts and keep the old one under it as a dated `Replaced:` line, add this
+   project's record, dated, under `## Sources` of every page it confirmed, cross-link with `[[page-name]]`, and cite the raw record
    (`projects/<name>/phases/<phase>.md`) for every claim.
 3. Read every phase's `## Defects` block first. `WAIVED` and `DEFERRED` are what the
    project shipped with — name them in your summary. Every `escaped: <phase>` is a

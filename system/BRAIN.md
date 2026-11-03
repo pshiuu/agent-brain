@@ -88,8 +88,13 @@ rules forbid and says why. Run `brain-mem check` before you finish a phase that 
   the next client's agents must not read them as how things are.
 - **Update the page that exists** before creating a new one. Two pages on one topic
   is the failure mode; merge them.
-- **When new evidence contradicts a page**, rewrite the claim and say what changed.
-  Keep the old claim only if knowing it was wrong is useful.
+- **When new evidence contradicts a page**, rewrite the claim and put the old one
+  under it: `  - Replaced: "<old claim>", YYYY-MM-DD, because <record>`. Git keeps the
+  diff, but no agent reads git history; this line is how the next one learns the
+  first answer was wrong and why, instead of rediscovering it.
+- **When a run confirms a claim**, add its record, dated, under `## Sources`. The newest
+  date there is when the page was last confirmed; `brain lint` notes a page none of whose
+  sources is newer than six months.
 - **Cross-link** with `[[page-name]]` (no `.md`). Liberally. A link to a page that
   does not exist yet marks something worth writing.
 - **Cite the raw record** so a claim can be checked: `projects/acme/phases/qa.md`. For
@@ -108,6 +113,7 @@ One line: what this page settles.
 ## What we know
 - Claim — why, and what it cost us. [[payload-hooks]]
 - Claim — why.
+  - Replaced: "the claim it used to make", 2026-09-14, because projects/acme-relaunch/phases/qa.md
 
 ## Open
 - Question we have not answered yet.
