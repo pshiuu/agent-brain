@@ -1,57 +1,77 @@
 # agent-brain
 
-A brain for your coding and content agents. It holds the instructions, memory and skills
-they work from, plus a `brain` command that runs each phase of a project with the right
-agent (Claude Code or Codex, with the model and effort you chose), in a sandbox of its own.
+A brain for your agents. It holds the instructions, memory and skills they work from,
+plus a `brain` command that runs each phase of a project with the right agent (Claude
+Code, Codex, Gemini CLI or OpenCode, with the model and effort you chose), in a sandbox
+of its own.
 
-You describe the work once as a **playbook**: research, outline, *your review*, draft,
-editor check, *your review*, retro. The brain runs it phase by phase. It sends reviews
-back to a fixer until they pass, stops where a human has to decide, and after every
-project compiles what it learned into a wiki the next project reads.
+You describe a kind of work once as a **playbook**: plan, build, *your review*, test,
+review, retro. The brain runs it phase by phase. It sends reviews back to a fixer until
+they pass, stops where a human has to decide, and after every project compiles what it
+learned into a wiki the next project reads. **Apps** package playbooks for a domain, so
+you install a way of working instead of writing it.
+
+## Why
+
+- **Agents that don't start from zero.** Every project ends with a retro that rewrites
+  the wiki pages it learned something about. The next project, on any agent, starts from
+  what the last ones found out, not from a blank prompt.
+- **Full autonomy without the risk.** Each phase runs in its own sandbox with only the
+  project mounted. The agent works without a permission prompt per command and can
+  reach nothing else on your machine; keys stay outside, in a proxy.
+- **You decide where it matters, and only there.** Human gates sit where judgement is
+  needed; between them, reviews and fixes loop on their own until they pass. `brain
+  auto` waits at a gate and carries on the moment you answer.
+- **The right agent for each job.** Every role picks its agent, model and effort. A
+  reviewer can run on a different model from the writer it checks.
+- **Instructions that improve, under your control.** Agents propose changes to their own
+  instructions with evidence from the runs; nothing changes until you accept. Each
+  playbook gets a scorecard (runs, minutes, dollars, FAIL rounds, findings let through)
+  and evals, so you can see whether a change helped.
+- **Memory that stays readable.** A wiki, not a chat log: one page per topic, tagged so
+  each agent reads only its scope, with sources, dated confirmations and a lint that
+  flags what went stale.
+- **Proof, not trust.** Phase contracts let the host check an agent's work before it is
+  handed on, and every attempt leaves a record: the exact prompt, the role as it was,
+  the inputs with their hashes, and the verdict.
+- **Any repeatable work.** Nothing is tied to a stack: ship a feature, migrate a
+  database, research a market, write and review an article, run a thesis.
 
 Two ideas hold it together.
 
 **The sandbox is the permission boundary.** Every phase runs in a
 [Docker Sandbox](https://docs.docker.com/ai/sandboxes/) (`sbx`, a VM each), or where
 that does not run, a hardened container behind an egress proxy, with only the project
-mounted. Inside it the agent works at full permission, with no approval prompt per file
-write or command, and it can reach nothing else on your machine. MCP servers, network
-rules and skills are declared once and apply to every sandbox.
+mounted. MCP servers, network rules and skills are declared once and apply to every
+sandbox.
 
 **Memory is a wiki, not a chat log.** A retro doesn't append notes nobody reads. It
 rewrites the knowledge page that owns the topic, so twenty projects' lessons about one
 thing stay one page. Agents read an index and the few pages in their scope, not
-everything. Changes to the instructions themselves are only *proposed*: the instructions
-are read-only to every agent, and nothing changes until you accept a proposal.
-
-Nothing here is tied to a stack or to web work. A playbook is any repeatable sequence of
-phases: ship a feature, research a market, migrate a database, write and review an
-article.
+everything. The instructions themselves are read-only to every agent, and change only
+through proposals you accept.
 
 ## What a project looks like
 
 ```bash
-brain new seo-article heat-pump-noise     # a project from a playbook, with its brief
-brain auto                                # run phases back to back
+brain new <playbook> <project>     # a project from a playbook, with its brief
+brain auto                         # run phases back to back
 ```
 
-The seo app's `seo-article` playbook, partway through:
+A playbook partway through:
 
 ```
-✓ research        seo-researcher   claude opus     what ranks, what people ask, a source per number
-✓ outline         seo-writer       claude opus
-▸ outline-gate    you              ← waits here; approve or send back with comments
-· images          image-researcher
-· draft           seo-writer
-· editor-check    seo-reviewer     ⇄ seo-writer    FAIL → fix → re-check, until PASS
-· final-gate      you
-· retro           retro            → knowledge/ pages, proposals for the instructions
+✓ plan          planner      claude opus      what to build, and how we'll know it works
+✓ build         developer    codex
+▸ build-gate    you          ← waits here; approve or send back with comments
+· test          tester
+· review        reviewer     ⇄ developer      FAIL → fix → re-check, until PASS
+· final-gate    you
+· retro         retro        → knowledge/ pages, proposals for the instructions
 ```
 
-`brain auto` parks at a human gate and carries on the moment you decide, from the
-terminal or from the cockpit. Every attempt leaves a record on the host: the exact
-prompt, the role file as it was, the inputs with their hashes, and the verdict the host
-reached about the handoff.
+Every attempt leaves a record on the host, and the cockpit shows where each project's
+time, money and re-runs went.
 
 ## The cockpit
 
@@ -93,7 +113,7 @@ cockpit and `brain watch`, opens the cockpit, and offers to put `brain` on your 
 A fresh brain has no playbooks. Get some from an app, or write your own:
 
 ```bash
-brain app install seo                # or Admin → Apps in the cockpit
+brain app install <app>              # or Admin → Apps in the cockpit
 brain new                            # pick a playbook, name the project, fill in the brief
 brain auto
 ```
@@ -118,15 +138,14 @@ brain playbook check <name>
 
 ## Apps
 
-Apps live in [pshiuu/agent-brain-apps](https://github.com/pshiuu/agent-brain-apps):
+An app is a domain packaged for the brain: its playbooks, roles, skills, MCP servers and
+settings, and optionally Studio pages and `brain <app>` commands. Install one and its
+playbooks are ready to run; update it and the update merges with what your runs taught
+the installed copy. Apps can depend on each other and ship starter knowledge.
 
-- **seo**: articles that rank and get quoted in AI answers (`seo-article`,
-  `aeo-refresh`, `article-combiner`), with a measured editor check and optional DataForSEO
-- **web**: websites on PayloadCMS, from brief to launch: content, brand kit, design,
-  build and QA
-- **clients**: a profile per client that every project for them reuses
-- **academy**: a workspace for theses and papers (sources, notes, drafts, checks) with
-  commands of its own
+Apps live in [pshiuu/agent-brain-apps](https://github.com/pshiuu/agent-brain-apps):
+content and search, websites, client profiles, and a research workspace for theses and
+papers among them.
 
 Writing an app: [`system/skills/app-format/SKILL.md`](system/skills/app-format/SKILL.md).
 
@@ -140,7 +159,7 @@ system/            the instructions, mounted read-only into every sandbox
   roles/ playbooks/ skills/
   apps/<name>/     installed apps (not in git; apps.lock records them)
 memory/            a git repo of its own, mounted read-write (not in this repo)
-templates/         the sandbox images: Claude Code / Codex, Playwright, helpers
+templates/         the sandbox images: one per agent, Playwright, helpers
 ui/                the cockpit (plain node, no build step; runs from this folder)
 test/              the state machine, contracts, apps and memory, without a sandbox
 examples/memory/   what a new brain's memory starts from
@@ -156,9 +175,10 @@ examples/memory/   what a new brain's memory starts from
 | [Running phases](docs/running.md) | dev servers, the two engines, how a role reaches the agent, running unattended |
 | [Memory](docs/memory.md) | the wiki, feeding it documents, the base and memory as two repos |
 | [Getting better](docs/learning.md) | proposals and evolve, analysing a playbook's runs, evals |
-| [Apps](docs/apps.md) | install, update, promote, what an app may declare; seo and academy |
+| [Apps](docs/apps.md) | install, update, promote, what an app may declare |
 | [Cockpit](docs/cockpit.md) | the Studio and Admin, running everything from the browser |
 | [Internals](docs/internals.md) | run records, crawling, graphify |
+| [Roadmap](docs/roadmap.md) | what is planned and not built yet |
 
 ## Working on the brain
 
