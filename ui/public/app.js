@@ -1280,7 +1280,10 @@ function storeApps () {
     const c = cat.find(x => x.name === a.name)
     return { name: a.name, label: a.label, icon: a.icon, version: a.version, desc: a.desc || c?.desc || '', installed: a, update: !!c?.update, flags: c?.flags || [...(a.main ? ['code'] : []), ...(a.config.secrets.length || a.config.settings.length ? ['settings'] : [])] }
   })
-  return [...mine, ...cat.filter(c => !S.apps.some(a => a.name === c.name)).map(c => ({ ...c, installed: null }))]
+  // A repo the human scanned offers its apps too, ahead of the catalog's of the same name: they asked for it.
+  const scan = (S.store.scan?.apps || []).map(c => ({ ...c, source: S.store.scan.source }))
+  const offered = [...scan, ...cat.filter(c => !scan.some(x => x.name === c.name))]
+  return [...mine, ...offered.filter(c => !S.apps.some(a => a.name === c.name)).map(c => ({ ...c, installed: null }))]
     .sort((x, y) => x.label.localeCompare(y.label))
 }
 async function storeAsk (body, btn) {
@@ -1291,6 +1294,10 @@ async function storeAsk (body, btn) {
 }
 function storeAct (a, verb, btn) {
   const code = a.flags.includes('code')
+  if (verb === 'install' && a.source) {
+    if (!window.confirm(`${a.label} is from ${a.source}, not this brain's apps repo. Its commands run on your machine${code ? ' and its code in your Studio' : ''}, with everything you may do there. Install and trust it?`)) return
+    return storeAsk({ verb, name: a.name, trust: true, from: a.source }, btn)
+  }
   if (verb === 'install') {
     if (code && !window.confirm(`${a.label} runs its own code in your Studio, with everything the Studio may do. Install and trust it?`)) return
     return storeAsk({ verb, name: a.name, trust: code }, btn)
@@ -1319,7 +1326,7 @@ function storeStatus () {
     if (!st.running && !S.watching) box.append(watchNote('the change waits in a request file until it starts'))
   } else if (st.status && !(st.status.ok && st.status.verb === 'catalog')) {
     const s = st.status, n = $('div', s.ok ? 'note' : 'note err')
-    n.append($('span', '', `${{ install: 'Installed', update: 'Updated', remove: 'Uninstalled', revert: 'Reverted' }[s.verb] || s.verb} ${s.name}${s.ok ? '' : ' — failed'} · ${s.at}`))
+    n.append($('span', '', `${{ install: 'Installed', update: 'Updated', remove: 'Uninstalled', revert: 'Reverted', scan: 'Scanned', catalog: 'Checked for updates' }[s.verb] || s.verb} ${s.name}${s.ok ? '' : ' — failed'} · ${s.at}`))
     if (!s.ok && s.log) { const pre = $('pre', '', s.log); pre.style.whiteSpace = 'pre-wrap'; pre.style.margin = '6px 0 0'; n.append(pre) }
     box.append(n)
   }
@@ -1358,13 +1365,30 @@ function appsView (name) {
   }
   search.oninput = () => { storeQuery = search.value; draw() }
   bar.append(search, tabs); box.append(bar, grid); draw()
+  box.append($('h2', 'store-section', 'Install from a repo'), repoScanner())
+  return box
+}
+
+/* An app someone wrote themselves: brain watch clones the repo (private ones too, with your
+   git access) and lists the apps in it, at its root or one folder down. They then show in
+   the grid above, marked with where they come from. */
+function repoScanner () {
+  const box = $('div'), sc = S.store.scan
+  box.append($('p', 'sub', 'Any git repo with an app.conf at its root or in a folder of its own. Its apps join the list above; installing one asks for your trust, since its commands run on this machine.'))
+  const bar = $('div', 'bar'), input = Object.assign(document.createElement('input'), { type: 'text', placeholder: 'owner/repo or a git URL', value: sc?.source || '' })
+  input.setAttribute('aria-label', 'app repository')
+  const go = $('button', '', ''); go.append(icon('magnifying-glass'), ' Scan'); go.disabled = busyStore()
+  const scan = () => input.value.trim() && storeAsk({ verb: 'scan', name: input.value.trim() }, go)
+  go.onclick = scan; input.onkeydown = e => { if (e.key === 'Enter') scan() }
+  bar.append(input, go); box.append(bar)
+  if (sc) box.append($('p', 'sub', `${sc.source} @ ${sc.commit.slice(0, 12)}, scanned ${sc.at}: ${sc.apps.length ? sc.apps.map(a => a.label).join(', ') : 'no app in it'}.`))
   return box
 }
 
 function appCard (a) {
   const c = $('a', 'store-card'); c.href = `#/apps/${a.name}`
   const top = $('div', 'store-card-top'), t = $('div')
-  t.append($('div', 'store-name', a.label), $('div', 'store-ver', [`v${a.version}`, a.installed?.lock?.commit.slice(0, 7), a.installed && 'installed'].filter(Boolean).join(' · ')))
+  t.append($('div', 'store-name', a.label), $('div', 'store-ver', [`v${a.version}`, a.installed?.lock?.commit.slice(0, 7), a.installed && 'installed', !a.installed && a.source].filter(Boolean).join(' · ')))
   top.append(appTile(a.name, a.icon), t)
   c.append(top, $('p', 'store-desc', a.desc || 'No description.'))
   const foot = $('div', 'store-card-foot'), tags = $('div', 'store-tags')
@@ -1387,7 +1411,7 @@ function appPage (name) {
   if (!a) return $('div', 'note err', `No app '${name}' installed or in the catalog.`)
   const box = $('div'), back = $('a', 'store-back'); back.href = '#/apps'; back.append(icon('arrow-left'), ' All apps')
   const head = $('div', 'store-page-head'), t = $('div')
-  t.append($('h1', '', a.label), $('p', 'sub', [`v${a.version}`, a.installed ? `installed in ${a.installed.dir}` : 'not installed',
+  t.append($('h1', '', a.label), $('p', 'sub', [`v${a.version}`, a.installed ? `installed in ${a.installed.dir}` : a.source ? `not installed · from ${a.source}` : 'not installed',
     a.installed?.lock ? `from ${a.installed.lock.source} @ ${a.installed.lock.commit.slice(0, 12)}` : ''].filter(Boolean).join(' · ')))
   const tags = $('div', 'store-tags')
   if (a.update) tags.append($('span', 'tag warn', 'Update available'))

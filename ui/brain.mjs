@@ -1704,7 +1704,7 @@ const readmeLead = text => {
 /** An app's README for its page in the store: the installed copy, else the catalog's. */
 export function appReadme (name) {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(name || '')) throw new HttpError(400, 'bad app name')
-  const text = read(join(SYS, 'apps', name, 'README.md')) ?? read(join(MEM, '.apps-catalog.d', `${name}.md`))
+  const text = read(join(SYS, 'apps', name, 'README.md')) ?? read(join(MEM, '.apps-scan.d', `${name}.md`)) ?? read(join(MEM, '.apps-catalog.d', `${name}.md`))
   if (text === null) throw new HttpError(404, `no README for '${name}'`)
   return { name, text }
 }
@@ -1724,23 +1724,28 @@ function appChanges (name) {
   return [...all].filter(f => { try { return !readFileSync(join(a, f)).equals(readFileSync(join(b, f))) } catch { return true } }).length
 }
 
-/** The Studio's Apps page. What the apps repo offers is memory/.apps-catalog, written by
- *  `brain watch` (the cockpit cannot clone a private repo); install, update, revert and
- *  remove are a request it runs, one at a time, with the outcome in .apps-status. */
-export function appStore () {
-  const text = read(join(MEM, '.apps-catalog')) || ''
+/** memory/.apps-catalog (what the apps repo offers) or .apps-scan (what a repo the human
+ *  named offers), both written by `brain watch`: the cockpit cannot clone a private repo. */
+function appCatalog (file) {
+  const text = read(join(MEM, file)) || ''
   const [, source = '', commit = '', at = ''] = text.split('\n')[0].match(/^# (\S+) (\S+) (.*)$/) || []
-  const catalog = text ? {
+  return text ? {
     source, commit, at,
     apps: text.split('\n').filter(l => l && !l.startsWith('#')).map(l => {
-      const [name, version, label, icon, flags, update, desc] = l.split('\t')
-      return { name, version, label, icon: icon || 'puzzle-piece', flags: (flags || '').split(',').filter(Boolean), update: update === 'yes', desc: desc || '' }
+      const [name, version, label, icon, flags, update, desc, path] = l.split('\t')
+      return { name, version, label, icon: icon || 'puzzle-piece', flags: (flags || '').split(',').filter(Boolean), update: update === 'yes', desc: desc || '', path: path || name }
     })
   } : null
+}
+/** The Studio's Apps page: the catalog, the last scan of another repo, and install, update,
+ *  revert, remove and scan as a request brain watch runs, one at a time, with the outcome
+ *  in .apps-status. */
+export function appStore () {
   const [head = '', ...log] = (read(join(MEM, '.apps-status')) || '').split('\n')
   const [ok, verb, name, ...when] = head.split(' ')
   return {
-    catalog,
+    catalog: appCatalog('.apps-catalog'),
+    scan: appCatalog('.apps-scan'),
     status: head ? { ok: ok === 'ok', verb, name, at: when.join(' '), log: log.join('\n').trim() } : null,
     pending: (read(join(MEM, '.apps-request')) || '').trim() || null,
     running: (read(join(MEM, '.apps-running')) || '').trim() || null
@@ -1765,17 +1770,28 @@ export function requestBaseUpdate () {
   return { ok: true, watching: watching() }
 }
 
-export function requestApps ({ verb, name = '', trust = false, force = false, confirm = '' }) {
+// bin/brain's app_source_ok: owner/repo or a git URL, never a folder on the host or a git option.
+const APP_SOURCE = /^([A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+|https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._~/-]+|git@[A-Za-z0-9.-]+:[A-Za-z0-9._~/-]+)$/
+export function requestApps ({ verb, name = '', trust = false, force = false, confirm = '', from = '' }) {
   if (existsSync(join(MEM, '.apps-request')) || existsSync(join(MEM, '.apps-running'))) throw new HttpError(409, 'another app change is queued or running — wait for it')
   if (verb === 'catalog') { writeFileSync(join(MEM, '.apps-request'), 'catalog\n'); return { ok: true, watching: watching() } }
+  if (verb === 'scan') {
+    const src = String(name).trim().replace(/^https?:\/\/(www\.)?github\.com\//, '').replace(/\.git$/, '').replace(/\/+$/, '')
+    if (!APP_SOURCE.test(src) || src.includes('..')) throw new HttpError(400, `'${name}' is not a GitHub owner/repo or a git URL`)
+    writeFileSync(join(MEM, '.apps-request'), `scan ${src}\n`); return { ok: true, watching: watching() }
+  }
   if (!['install', 'update', 'remove', 'revert'].includes(verb)) throw new HttpError(400, `'${verb}' is not an app command`)
   if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new HttpError(400, `'${name}' is not an app name`)
   const installed = existsSync(join(SYS, 'apps', name, 'app.conf'))
   if (verb === 'install' && installed) throw new HttpError(400, `'${name}' is already installed`)
-  if (verb === 'install' && !appStore().catalog?.apps.some(a => a.name === name)) throw new HttpError(404, `'${name}' is not in the catalog`)
+  // From another repo: only what its last scan found, and only with the trust tick.
+  const scan = appStore().scan, scanned = from && scan?.source === from && scan.apps.find(a => a.name === name)
+  if (from && (verb !== 'install' || !scanned)) throw new HttpError(404, `'${name}' is not in the scan of ${from}`)
+  if (from && !trust) throw new HttpError(400, `'${name}' is from ${from}: its commands run on your machine, so it needs your trust`)
+  if (verb === 'install' && !from && !appStore().catalog?.apps.some(a => a.name === name)) throw new HttpError(404, `'${name}' is not in the catalog`)
   if (verb !== 'install' && !installed) throw new HttpError(404, `no app '${name}' installed`)
   if (verb === 'remove' && confirm !== name) throw new HttpError(400, 'type the app\'s name to confirm')
-  writeFileSync(join(MEM, '.apps-request'), [verb, name, trust && 'trust', force && 'force'].filter(Boolean).join(' ') + '\n')
+  writeFileSync(join(MEM, '.apps-request'), [verb, name, trust && 'trust', force && 'force', scanned && `from ${from} ${scanned.path}`].filter(Boolean).join(' ') + '\n')
   return { ok: true, watching: watching() }
 }
 

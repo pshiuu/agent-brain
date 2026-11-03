@@ -2691,13 +2691,15 @@ app_fetch() { # name src path dest -> dest holds the app's folder; prints the co
 # What the apps repo (APPS_SOURCE) offers, for the Studio's Apps page: memory/.apps-catalog,
 # a "# <source> <commit> <date>" header, then one tab-separated line per app: name, version,
 # label, icon, what it brings beyond roles and playbooks, whether the installed copy is
-# behind (yes|no, - when not installed from this source) and its description (app.conf's
-# description line, else the first paragraph of its README). Each README is kept beside it
-# in memory/.apps-catalog.d/ for the app's page. Behind = the repo's folder differs from
-# system/apps/.base/<name>, the copy as installed.
-app_catalog() {
-  local src tmp="" repo commit d n flags upd desc out="$MEM/.apps-catalog"
-  src="$(setting APPS_SOURCE pshiuu/agent-brain-apps)"
+# behind (yes|no, - when not installed from this source), its description (app.conf's
+# description line, else the first paragraph of its README) and its folder in the repo
+# (. for an app at the repo's root). Each README is kept beside it in
+# memory/.apps-catalog.d/ for the app's page. Behind = the repo's folder differs from
+# system/apps/.base/<name>, the copy as installed. Given a source and a file, the same for
+# any repo: the Studio's "install from a repo" scan, memory/.apps-scan.
+app_catalog() { # [source out]
+  local src="${1:-}" tmp="" repo commit d n p flags upd desc out="${2:-$MEM/.apps-catalog}"
+  [ -n "$src" ] || src="$(setting APPS_SOURCE pshiuu/agent-brain-apps)"
   if [ -d "$src" ]; then repo="$(cd "$src" && pwd -P)"; commit="$(git -C "$repo" rev-parse HEAD 2>/dev/null || echo local)"
   else
     tmp="$(mktemp -d)"
@@ -2706,8 +2708,10 @@ app_catalog() {
   fi
   rm -rf "$out.d.tmp"; mkdir -p "$out.d.tmp"
   { printf '# %s %s %s\n' "$src" "$commit" "$(date '+%F %H:%M')"
-    for d in "$repo"/*/; do
-      [ -f "$d/app.conf" ] || continue; n="$(basename "$d")"; flags=""
+    for d in "$repo/" "$repo"/*/; do
+      [ -f "$d/app.conf" ] || continue; flags=""
+      if [ "$d" = "$repo/" ]; then n="$(app_field "$d" name)"; p=.; else n="$(basename "$d")"; p="$n"; fi
+      [[ "$n" =~ ^[a-z0-9][a-z0-9-]*$ ]] || continue
       [ -f "$d/ui/main.js" ] && flags="$flags,code"
       [ -f "$d/cli.sh" ] && flags="$flags,commands"
       grep -qE '^(secret|setting)[[:space:]]' "$d/app.conf" && flags="$flags,settings"
@@ -2719,18 +2723,25 @@ app_catalog() {
       desc="$(app_field "$d" description)"
       [ -n "$desc" ] || desc="$(awk 'NR == 1 && /^#/ { next } NF { p = p (p ? " " : "") $0; next } p { exit } END { print p }' "$d/README.md" 2>/dev/null)"
       [ -f "$d/README.md" ] && cp "$d/README.md" "$out.d.tmp/$n.md"
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$(app_field "$d" version)" "$(app_field "$d" label)" "$(app_field "$d" icon)" "${flags#,}" "$upd" "$(printf '%s' "$desc" | tr '\t' ' ')"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$(app_field "$d" version)" "$(app_field "$d" label)" "$(app_field "$d" icon)" "${flags#,}" "$upd" "$(printf '%s' "$desc" | tr '\t' ' ')" "$p"
     done
   } > "$out.tmp" && mv "$out.tmp" "$out"
   rm -rf "$out.d"; mv "$out.d.tmp" "$out.d"
   [ -n "$tmp" ] && rm -rf "$tmp"
-  info "catalog: $(grep -vc '^#' "$out") app(s) in $src (${commit:0:12})"
+  info "$(grep -vc '^#' "$out") app(s) in $src (${commit:0:12})"
 }
 
-# The Studio's Apps page: memory/.apps-request is "<verb> <name> [trust] [force]", moved to
-# .apps-running while it runs. What the terminal would ask is in the request instead: trust
-# for an app with Studio code, force for removing one this brain changed. The result is
-# memory/.apps-status: "<ok|error> <verb> <name> <date>", then what brain printed.
+# A source the Studio may name: owner/repo on GitHub or a git URL over https or ssh. Not a
+# folder on this machine, and nothing git would read as an option or a transport helper.
+app_source_ok() {
+  [[ "$1" =~ ^([A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+|https://[A-Za-z0-9.-]+/[A-Za-z0-9._~/-]+|git@[A-Za-z0-9.-]+:[A-Za-z0-9._~/-]+)$ ]] && [[ "$1" != *..* ]]
+}
+
+# The Studio's Apps page: memory/.apps-request is "<verb> <name> [trust] [force] [from <source> <path>]",
+# or "scan <source>", moved to .apps-running while it runs. What the terminal would ask is
+# in the request instead: trust for an app with Studio code or from a repo other than
+# APPS_SOURCE (its cli.sh runs on this machine), force for removing one this brain changed.
+# The result is memory/.apps-status: "<ok|error> <verb> <name> <date>", then what brain printed.
 apps_request() {
   local verb name flags out ok=ok
   read -r verb name flags < "$MEM/.apps-running" || true
@@ -2740,20 +2751,31 @@ apps_request() {
 }
 
 apps_do() { # verb name flags -> runs in apps_request's command substitution, so die and export stay there
-  local verb="$1" name="$2" skills=""
+  local verb="$1" name="$2" skills="" from="" path=""
   export BRAIN_NONINTERACTIVE=1
   case " $3 " in *" trust "*) export BRAIN_TRUST_APP="$name" ;; esac
   case " $3 " in *" force "*) export BRAIN_FORCE=1 ;; esac
+  set -f; set -- $3; set +f
+  while [ $# -gt 0 ]; do [ "$1" = from ] && { from="${2:-}"; path="${3:-}"; break; }; shift; done
   case "$verb" in
     catalog) app_catalog; base_check; return ;;
+    scan) app_source_ok "$name" || die "'$name' is not a GitHub owner/repo or a git URL"
+      app_catalog "$name" "$MEM/.apps-scan"; return ;;
     install|update|remove|revert) ;;
     *) die "the Studio asked for '$verb', which is not an app command" ;;
   esac
   [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "'$name' is not an app name"
   if [ "$verb" = install ]; then [ ! -d "$SYS/apps/$name" ] || die "'$name' is already installed"
   else [ -d "$SYS/apps/$name" ] || die "no app '$name' installed"; fi
+  if [ -n "$from" ]; then
+    [ "$verb" = install ] || die "only an install names where the app comes from"
+    app_source_ok "$from" || die "'$from' is not a GitHub owner/repo or a git URL"
+    [ "$path" = . ] || [[ "$path" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "'$path' is not an app's folder"
+    [ "$from" = "$(setting APPS_SOURCE pshiuu/agent-brain-apps)" ] || [ "${BRAIN_TRUST_APP:-}" = "$name" ] \
+      || die "'$name' is from $from, not this brain's apps repo: its commands would run on this machine — install it with the trust tick"
+  fi
   app_has_skills "$name" && skills=1
-  cmd_app "$verb" "$name"
+  if [ -n "$from" ]; then cmd_app install "$name" --from "$from" "$path"; else cmd_app "$verb" "$name"; fi
   # What the terminal would tell you to run next, done here: the Studio has no terminal.
   app_has_skills "$name" && skills=1
   # remove syncs on its own, in app_remove, so the terminal gets it too.

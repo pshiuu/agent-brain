@@ -132,7 +132,10 @@ Admin → Apps lists the installed apps and what `APPS_SOURCE` offers (`memory/.
 written by `brain watch` / `brain app catalog`: version, label, the first paragraph of the
 README, and whether the app brings Studio code, commands or settings). Install, update,
 revert and remove are staged as `memory/.apps-request` and run by `brain watch`; the trust
-question becomes a confirm dialog. Each app has a page there: its tile, its actions, its
+question becomes a confirm dialog. Install from a repo scans any other repo
+(`scan <source>` → `memory/.apps-scan`, same format) and installs what it found with
+`from <source> <path>` in the request, trust required. An app at a repo's root, alone in its
+own repo, is found by its app.conf `name`. Each app has a page there: its tile, its actions, its
 settings and its README rendered, so write the README for the person deciding to install it.
 
 ## What `brain app check` enforces

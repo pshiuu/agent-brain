@@ -294,6 +294,30 @@ hasnt "$(cat "$SYS/apps/shop/roles/shop-writer.md")" "# mine" "they are gone"
 is "$(request 'remove shop')" "ok" "remove from the Studio"
 no "it is gone" test -d "$SYS/apps/shop"
 is "$(request 'frobnicate shop')" "error" "an unknown verb"
+for src in me/my-apps https://github.com/me/my-apps.git git@gitlab.com:me/my-apps.git; do
+  yes "the Studio may name $src" app_source_ok "$src"; done
+for src in "$CAT" ./x me/../x -uupload-pack=x ext::sh 'https://x.com/a b' file:///tmp/x; do
+  no "the Studio may not name $src" app_source_ok "$src"; done
+is "$(request "scan $CAT")" "error" "a scan of a folder on this machine is refused"
+OWN="$T/own"; fake_app "$OWN" mine; fake_app "$OWN/extra" extra
+git -C "$OWN" init -q && git -C "$OWN" add -A && git -C "$OWN" commit -qm own
+real_source_ok="$(declare -f app_source_ok)"; app_source_ok() { [ "$1" = "$OWN" ]; }
+is "$(request "scan $OWN")" "ok" "a scan of someone's own repo"
+has "$(head -1 "$MEM/.apps-scan")" "# $OWN " "it says which repo"
+has "$(cat "$MEM/.apps-scan")" "$(printf 'mine\t1.0.0\tmine\t\t\t-\t\t.')" "an app at the repo's root, by its app.conf name"
+has "$(cat "$MEM/.apps-scan")" "$(printf 'extra\t1.0.0\textra\t\t\t-\t\textra')" "and one in a folder"
+is "$(request "install mine from $OWN .")" "error" "an app from another repo needs the trust tick"
+has "$(cat "$MEM/.apps-status")" "commands would run on this machine" "and the status says why"
+is "$(request "install mine trust from $OWN ../x")" "error" "a folder that is not an app's"
+is "$(request "update mine trust from $OWN .")" "error" "only an install names its source"
+is "$(request "install mine trust from $OWN .")" "ok" "with the tick it installs from the root"
+is "$(awk '$1 == "mine" { print $2, $4 }' "$SYS/apps.lock")" "$OWN ." "and the lock remembers where from, for its updates"
+is "$(request "install extra trust from $OWN extra")" "ok" "and from a folder"
+echo "# new" >> "$OWN/roles/mine-writer.md"; git -C "$OWN" commit -qam newer
+is "$(request 'update mine')" "ok" "an update comes from that repo"
+has "$(cat "$SYS/apps/mine/roles/mine-writer.md")" "# new" "the update landed"
+eval "$real_source_ok"
+for a in mine extra; do rm -rf "$SYS/apps/$a" "$SYS/apps/.base/$a"; sed -i.bak "/^$a /d" "$SYS/apps.lock"; done
 rm -rf "$SYS/apps/paint" "$SYS/apps/.base/paint" "$SYS/brain.conf"; sed -i.bak '/^paint /d' "$SYS/apps.lock"
 
 section "app test runs the app's own tests"

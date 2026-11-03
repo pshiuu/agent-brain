@@ -24,6 +24,11 @@ settings and Install, Update, Revert or Uninstall. `brain watch` checks the repo
 press the button (`brain app catalog` at a terminal), runs each change in the background,
 then `brain sync-skills` and `sync-sandbox` as needed, and shows how it went. An app with
 its own Studio code asks you to trust it; Uninstall asks once (twice when this brain changed it).
+An app you or someone else wrote installs the same way: under **Install from a repo**, give
+an `owner/repo` or a git URL and press Scan. `brain watch` clones it (private repos too, with
+your git access) and lists every app in it, at its root or one folder down; they join the
+grid, marked with where they come from. Installing one always asks for your trust, since its
+`cli.sh` runs on your machine, and later updates come from that same repo.
 Admin's Playbooks, Roles and Skills pages tag everything an app brought with the app it came
 with, linked to its page. None of it can be deleted on its own, since the app's other parts
 depend on it; uninstalling the app removes all of it, and `brain app remove` runs
