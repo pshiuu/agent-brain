@@ -16,6 +16,15 @@ is "$(awk -F= '$1 == "PROJECT_DIR" { print $2 }' "$MEM/projects/my-feature/proje
 (cd "$T/elsewhere" && cmd_new build rel --dir folder-name >/dev/null 2>&1)
 is "$(awk -F= '$1 == "PROJECT_DIR" { print $2 }' "$MEM/projects/rel/project.env")" "$T/elsewhere/folder-name" "a relative --dir is stored absolute"
 
+section "a playbook links its projects to an app from the start"
+printf 'INTEGRATIONS=github\n' > "$SYS/playbooks/build/playbook.env"
+cmd_new build linked --dir "$T/linked" >/dev/null 2>&1
+has "$(cat "$MEM/projects/linked/project.env")" "INTEGRATIONS=github" "playbook.env's INTEGRATIONS lands in project.env"
+printf 'INTEGRATIONS="a; rm -rf x"\n' > "$SYS/playbooks/build/playbook.env"
+cmd_new build odd --dir "$T/odd" >/dev/null 2>&1
+hasnt "$(cat "$MEM/projects/odd/project.env")" "INTEGRATIONS" "a value that is not one app name is not copied"
+rm "$SYS/playbooks/build/playbook.env"
+
 section "finding the project from the folder"
 is "$(cd "$APP" && project_name)" "my-feature" "the one project in a folder, whatever the folder is called"
 is "$(cd "$T/elsewhere" && project_name)" "elsewhere" "a folder no project works in falls back to its own name"

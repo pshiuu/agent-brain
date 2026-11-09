@@ -1633,7 +1633,9 @@ cmd_new() {
   [ -e "$pdir/project.env" ] && die "project '$pname' already exists in memory"
 
   # Playbooks with a code template: clone it fresh, drop its history, start a new repo.
-  local TEMPLATE_REPO="" TEMPLATE_BRANCH="" tpl_sha=""
+  # INTEGRATIONS: the apps whose <app>_project_check runs before each of its projects' phases
+  # (project_integrations_check), linked from the start — the github app's task branch, say.
+  local TEMPLATE_REPO="" TEMPLATE_BRANCH="" tpl_sha="" INTEGRATIONS=""
   # shellcheck disable=SC1090
   [ -f "$(playbook_dir "$playbook")/playbook.env" ] && source "$(playbook_dir "$playbook")/playbook.env"
   if [ -n "$TEMPLATE_REPO" ]; then
@@ -1656,6 +1658,7 @@ cmd_new() {
     printf 'PLAYBOOK=%s\nPROJECT_DIR=%s\nCREATED=%s\n' "$playbook" "$dir" "$(date +%F)"
     [ -n "$client" ] && printf 'CLIENT=%s\n' "$client"
     [ -n "$tpl_sha" ] && printf 'TEMPLATE=%s@%s\n' "$TEMPLATE_REPO" "$tpl_sha"
+    [[ "$INTEGRATIONS" =~ ^[a-z0-9][a-z0-9-]*$ ]] && printf 'INTEGRATIONS=%s\n' "$INTEGRATIONS"
   } > "$pdir/project.env"
   if [ -n "$client" ]; then
     mkdir -p "$MEM/clients/$client"

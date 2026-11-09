@@ -206,8 +206,11 @@ For several providers, quote the value: `INTEGRATIONS='app-one app-two'`.
 Before each `brain run` phase, the launcher calls `<app>_project_check <project>`
 from that installed app's cli.sh. Nonzero prevents engine launch. Removing a linked
 integration therefore requires unlinking the project explicitly first. Unlinked
-projects remain independent. Hooks must start with the app's name and be read-only
-checks; updates remain staged requests. The header points engines to the project's
+projects remain independent. Hooks must start with the app's name. They may prepare
+the project's own checkout on this machine (the github app puts it on the task's branch)
+but change nothing remote: updates elsewhere remain staged requests. A playbook links
+every project made from it with `INTEGRATIONS=<app>` in its `playbook.env`, which
+`brain new` copies into `project.env`. The header points engines to the project's
 `integration-context.md`. Both engines receive the same context.
 
 An explicitly linked integration may use the ordinary kit read/request methods for
