@@ -92,6 +92,28 @@ const cmd = text => {
 
 // Same rule as ui/brain.mjs toSlug, which slugs the name again on the server.
 // Letters with accents keep their sound: Wärmepumpe is waermepumpe, café is cafe.
+/* What each connected subscription has left (brain.mjs usage), as its CLI last reported it:
+   a row per agent, a meter per window. Null when no agent runs on a subscription. */
+const atTime = t => new Date(t).toLocaleString([], new Date(t).toDateString() === new Date().toDateString() ? { hour: '2-digit', minute: '2-digit' } : { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+function usageBlock (usage = {}, engines = []) {
+  const names = Object.keys(usage)
+  if (!names.length) return null
+  const box = $('div', 'usage')
+  for (const n of names) {
+    const u = usage[n], row = $('div', 'usage-row'), who = $('div', 'usage-who')
+    who.append($('b', '', engines.find(e => e.name === n)?.label || n), $('span', 'faint', `as of ${atTime(u.at)}`))
+    row.append(who)
+    for (const w of u.windows) {
+      const reset = w.resetsAt <= Date.now(), m = $('meter'), s = $('span', 'usage-win')
+      Object.assign(m, { min: 0, max: 100, low: 70, high: 90, optimum: 0, value: reset ? 0 : w.used })
+      m.setAttribute('aria-label', `${w.label}: ${Math.round(w.used)}% used`)
+      s.append($('span', '', w.label), m, $('span', 'faint', reset ? 'reset since' : `${Math.round(w.used)}% · resets ${atTime(w.resetsAt)}`))
+      row.append(s)
+    }
+    box.append(row)
+  }
+  return box
+}
 const toSlug = s => String(s || '').trim().toLowerCase()
   .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss')
   .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')

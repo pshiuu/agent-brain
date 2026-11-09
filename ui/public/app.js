@@ -234,6 +234,8 @@ function dashboard () {
   box.append(head)
   const upd = baseUpdateNote(S, () => refreshState(scrollY))
   if (upd) box.append(upd)
+  const use = usageBlock(S.usage, S.engines)
+  if (use) box.append($('h2', '', 'Subscription usage'), use)
 
   const errs = lintBlock(S.lint, f => f.level === 'error')
   const warns = lintBlock(S.lint, f => f.level === 'warn')

@@ -230,3 +230,12 @@ input[type=file]::file-selector-button { font: 500 13px var(--sans); color: var(
 .note.base-update > div { flex: 1; }
 .note.base-update p { margin: 0; }
 .note.base-update ul { margin: 6px 0 0; padding-left: 18px; }
+
+/* What each subscription has left (shared.js usageBlock). */
+.usage { display: grid; gap: 10px; }
+.usage-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; }
+.usage-who { display: grid; width: 170px; flex: none; }
+.usage-win { display: inline-flex; align-items: center; gap: 8px; min-width: 290px; }
+.usage-win > span:first-child { width: 52px; }
+.usage-win meter { width: 100px; }
+.usage .faint { color: var(--faint); font-size: 12px; }

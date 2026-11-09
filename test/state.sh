@@ -541,6 +541,24 @@ printf 'keyword  text  project  yes  Missing heading\n' > "$IP/inputs"
 case "$(check_inputs "$IP")" in "note inputs:1 input 'keyword' has no '## Missing heading' heading"*) ok ;; *) bad "a per-project input without its brief heading is a note: '$(check_inputs "$IP")'" ;; esac
 holds "and only a note" check_inputs "$IP"
 
+section "subscription limits — what the CLIs report, read back"
+OLD_MEM="$MEM"; MEM="$T/usage"; mkdir -p "$MEM/projects/.usage"
+now=$(date +%s); later=$((now + 3600)); week=$((now + 86400)); past=$((now - 60))
+U="$MEM/projects/.usage"
+denies "no file: usable" limit_until claude
+# Claude's statusline input, pretty-printed: the reader must not care.
+printf '{\n  "session_id": "x",\n  "rate_limits": {\n    "five_hour": { "used_percentage": 100, "resets_at": %s },\n    "seven_day": { "used_percentage": 40.5, "resets_at": %s }\n  }\n}\n' "$later" "$week" > "$U/claude.json"
+is "$(limit_until claude)" "$later" "claude at 100% of 5h waits for that window"
+is "$(usage_windows claude | tr '\n' ' ')" "100 $later 40 $week " "both windows, percent truncated"
+printf '{"rate_limits":{"five_hour":{"used_percentage":100,"resets_at":%s}}}' "$past" > "$U/claude.json"
+denies "a window whose reset has passed is usable" limit_until claude
+# Codex's session-log line, as copied out by usage_poll.
+printf '{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":100.0,"window_minutes":300,"resets_at":%s},"secondary":{"used_percent":100.0,"window_minutes":10080,"resets_at":%s},"credits":{"has_credits":false,"unlimited":false,"balance":"0"}}}}\n' "$later" "$week" > "$U/codex.json"
+is "$(limit_until codex)" "$week" "both codex windows full: the later reset wins"
+printf '{"payload":{"rate_limits":{"primary":{"used_percent":99.9,"window_minutes":300,"resets_at":%s}}}}\n' "$later" > "$U/codex.json"
+denies "99.9% is not a limit" limit_until codex
+MEM="$OLD_MEM"
+
 echo
 [ "$FAIL" -eq 0 ] && echo "✓ $PASS passed" || echo "✗ $FAIL failed, $PASS passed"
 exit $((FAIL > 0))

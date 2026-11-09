@@ -89,6 +89,23 @@ export function engines () {
 }
 const engineNames = () => engines().map(e => e.name)
 
+/** What each subscription has left, as its own CLI last reported it (bin/brain usage_file):
+ *  Claude's statusline input, Codex's session-log line, in memory/projects/.usage/. An
+ *  engine on an API key reports nothing and is left out. */
+export function usage () {
+  const out = {}
+  for (const { name } of engines()) {
+    const f = join(MEM, 'projects', '.usage', `${name}.json`)
+    let j; try { j = JSON.parse(read(f)) } catch { continue }
+    const rl = j?.rate_limits || j?.payload?.rate_limits
+    if (!rl) continue
+    const win = (w, label) => w && { label, used: w.used_percentage ?? w.used_percent, resetsAt: w.resets_at * 1000 }
+    const windows = [win(rl.five_hour || rl.primary, '5 hours'), win(rl.seven_day || rl.secondary, 'Week')].filter(Boolean)
+    if (windows.length) out[name] = { at: mtime(f), windows }
+  }
+  return out
+}
+
 export function models () {
   const cat = codexCatalog()
   const codexEfforts = [...new Set(cat.models.flatMap(m => m.efforts))]
@@ -929,6 +946,8 @@ export function projects () {
       // seconds before the sandbox is up and the phase holds its .running lease; without
       // it a run that is starting showed as paused.
       runPending: existsSync(join(pdir, '.run-request')) || existsSync(join(pdir, '.launching')),
+      // Waiting out a subscription limit (bin/brain wait_limit): which engine, and until when.
+      limit: (([engine, until]) => +until * 1000 > Date.now() ? { engine, until: +until * 1000 } : null)((read(join(pdir, '.limit')) || '').trim().split(/\s+/)),
       qa: qaReports(name), mem: `memory/projects/${name}`,
       memory: projectMemory(name, pages, log, props)
     }
@@ -2485,7 +2504,7 @@ export function knowledgeGraph () {
 
 export function state () {
   return {
-    playbooks: playbooks(), apps: apps(), store: appStore(), base: baseUpdate(), engines: engines(), clientsOn: clientsOn(), roles: roles(), skills: skills(), sandbox: sandbox(), projects: projects(), clients: clients(), archivedClients: archivedClients(), knowledge: knowledge(), proposals: proposals(read(join(MEM, 'proposals.md'))), examples: examples(), sources: sources(), lint: lint(), models: models(), maxFixLoops: MAX_FIX_LOOPS, hostBrain: HOST_BRAIN, hostDev: HOST_DEV, watching: watching(), evolvePending: existsSync(join(MEM, '.evolve-request')),
+    playbooks: playbooks(), apps: apps(), store: appStore(), base: baseUpdate(), engines: engines(), usage: usage(), clientsOn: clientsOn(), roles: roles(), skills: skills(), sandbox: sandbox(), projects: projects(), clients: clients(), archivedClients: archivedClients(), knowledge: knowledge(), proposals: proposals(read(join(MEM, 'proposals.md'))), examples: examples(), sources: sources(), lint: lint(), models: models(), maxFixLoops: MAX_FIX_LOOPS, hostBrain: HOST_BRAIN, hostDev: HOST_DEV, watching: watching(), evolvePending: existsSync(join(MEM, '.evolve-request')),
     maxParallel: Number(setting('BRAIN_MAX_PARALLEL', 3)) || 0,
     pending: { new: pendingProjects(), drafts: drafts(), draft: (read(join(MEM, '.draft-request')) || '').trim() || null, commit: existsSync(join(MEM, '.commit-request')) }
   }

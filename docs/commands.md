@@ -44,6 +44,18 @@ sandbox — full permission on the code, nothing outside it. When the agent has
 finished the phase, exit the session; `brain` commits the memory and (in `auto`)
 starts the next phase.
 
+**Subscription limits.** On a Claude or ChatGPT subscription, both CLIs report what the
+5-hour and weekly windows have left: Claude Code through its statusline, Codex in its
+session log. `brain run` keeps the latest report in `memory/projects/.usage/<engine>.json`,
+and the Studio and Admin overviews show it as one meter per window, with its reset time.
+That works the same under sbx and the Docker driver. When a window reaches 100%,
+the phase is stopped instead of idling until the timeout, its record says `rate_limited`, and
+`brain run` / `brain auto` wait until the reset (the Studio shows "Usage limit · resumes
+15:12"). Then the phase goes on in the same conversation (`claude --continue`,
+`codex resume --last`). A run that would start on an engine already at its limit waits
+without starting. Ctrl-C stops the wait; the next `brain run` still resumes the phase.
+The meters are only as fresh as the last request an agent made.
+
 ## Every command and flag
 
 `brain` with no arguments prints the same list. `init`, `playbooks`, `playbook`, `new`
@@ -62,7 +74,7 @@ from inside the project folder.
 | `brain role new [name]` | — | writes both halves a role needs: the `roles.conf` line (engine, model, effort) and `roles/<name>.md`. Write it yourself or have the `role-author` draft it. Refuses a name that already exists |
 | `brain new [<playbook> <name>]` | `--dir PATH`<br>`--client SLUG` | asks for whatever you leave out. `--dir` defaults to `$DEV_DIR/<name>` and is where existing code goes; `--client` is slugified and seeds `memory/clients/<slug>/profile.md`. It makes a git repo only by cloning a template: otherwise the phase that writes the code makes one where the code is (`redesign-website`: `site/`, so `crawl/`, `brandkit/` and `design/` beside it are never committed) |
 | `brain run [phase]` | `--engine claude\|codex`<br>`--model M`<br>`--effort L` | phase defaults to the next unfinished one. The flags override `roles.conf` for this one run |
-| `brain auto` | — | `run` in a loop until the playbook finishes or something needs you. Waits at a human gate rather than stopping. Exit code says which: `0` complete, `1` error, `2` a phase came back not done, `3` a ceiling stopped it |
+| `brain auto` | — | `run` in a loop until the playbook finishes or something needs you. Waits at a human gate rather than stopping, and at a subscription's usage limit (Subscription limits, above). Exit code says which: `0` complete, `1` error, `2` a phase came back not done, `3` a ceiling stopped it |
 | `brain open` | `--engine`<br>`--model`<br>`--effort` | free session with the brain and this project's memory loaded. Defaults to claude and the engine's own default model |
 | `brain up` | `[engine]` | publish this project's `PORTS` to the host and run its `DEV_UP`, so the site and its database are reachable at `localhost` between phases. Starts the sandbox if it is stopped |
 | `brain down` | `[engine]` | stop this project's sandbox: the dev stack and the published ports go with it, the data stays in its volumes. `brain up` brings it all back |

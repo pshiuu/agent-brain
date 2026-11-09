@@ -52,6 +52,7 @@ function status (p) {
   if (humanTurn(n)) return { key: 'you', label: 'Waiting for you', icon: 'hand-pointing', rank: 0 }
   if (n.state === 'running') return { key: 'work', label: stepName(n), icon: 'circle-notch', rank: 1 }
   if (n.state === 'stuck') return { key: 'stuck', label: 'Needs help', icon: 'warning-circle', rank: 2 }
+  if (p.limit) return { key: 'queued', label: `Usage limit · resumes ${atTime(p.limit.until)}`, icon: 'hourglass', rank: 3 }
   if (p.runPending) return { key: 'queued', label: 'Queued', icon: 'clock', rank: 3 }
   return { key: 'paused', label: 'Paused', icon: 'pause', rank: 4 }
 }
@@ -155,8 +156,10 @@ function overview () {
   const waiting = ps.filter(p => status(p).key === 'you')
   const crumbs = [['Overview', '', 'house']]
   const pend = S.pending.new.filter(n => !ofKind(n))
+  const use = usageBlock(S.usage, S.engines)
+  const usage = use && card('Agent usage', 'What each subscription has left. A run that reaches a limit pauses and carries on by itself after the reset.', null, pad(use))
   if (!ps.length && !pend.length) {
-    return frame(crumbs, [newButton()], head('Overview'), watchingNote(),
+    return frame(crumbs, [newButton()], head('Overview'), watchingNote(), usage,
       card('Your first project', '', null, empty('pen-nib', 'No projects yet', 'Pick what kind of work it is and fill in the brief. The steps run by themselves, and you review where the playbook asks you to.', newButton())))
   }
   const stats = $('div', 'stats')
@@ -167,6 +170,7 @@ function overview () {
   const sub = waiting.length ? `${waiting.length} review${waiting.length > 1 ? 's' : ''} only you can do.` : 'Nothing is waiting for you right now.'
   const parts = [head('Overview', sub), watchingNote(), baseUpdateNote(S, () => refresh().then(() => render())), stats].filter(Boolean)
   if (pend.length) parts.push(startingCard())
+  if (usage) parts.push(usage)
   if (waiting.length) parts.push(card('Waiting for you', 'Open one, comment on the text, then approve it or send it back.', null, projectTable(waiting)))
   const adj = adjustments()
   if (adj.length) parts.push(card('Playbook changes', 'What you asked the AI to change. Look it over, then apply it or not.', null, table([['Playbook', ''], ['Status', '']], adj.map(d => {

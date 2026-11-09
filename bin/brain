@@ -153,6 +153,7 @@ if [ "$SANDBOX_DRIVER" = auto ]; then
 fi
 [ "$SANDBOX_DRIVER" = docker ] && sbx() { "$BRAIN/bin/sbx-docker" "$@"; }
 RUN_STATUS=""   # set by cmd_run, read by cmd_auto; declared here because set -u is on
+LIMIT_ENGINE="" LIMIT_UNTIL=0   # set by cmd_run when a subscription limit stopped it (RUN_STATUS=limited)
 source "$BRAIN/bin/phase-contract.sh"
 # names_in, the root lookups (sys_roots, in_roots, playbook_dir, app_field), brief_body,
 # proposals_section, knowledge_scope and lint_memory: shared with brain-mem in the sandbox.
@@ -633,8 +634,53 @@ memory_init() { # a brain without memory/ gets the files an agent expects, as it
   [ -e "$MEM/.git" ] || { git -C "$MEM" init -q && git -C "$MEM" add -A && git -C "$MEM" commit -qm "memory: start" && info "memory/ is a git repo of its own: back it up with a private remote (git -C $MEM remote add origin <url>)"; }
 }
 
-launch() { # engine model effort prompt [role]
-  local engine="$1" model="$2" effort="$3" prompt="$4" role="${5:-}"
+# ---------- subscription limits ---------------------------------------------
+# What a subscription has left, as the agent CLIs themselves report it: the one source both
+# drivers share, because under sbx the key never passes through anything of ours. Claude
+# Code hands its statusline rate_limits.five_hour/seven_day {used_percentage, resets_at},
+# and launch points that statusline at a file. Codex writes rate_limits.primary/secondary
+# {used_percent, window_minutes, resets_at} into its session log, and usage_poll copies the
+# latest line out. Both land in memory/projects/.usage/<engine>.json (ignored with
+# projects/*); the cockpit reads the same files (ui/brain.mjs usage).
+usage_file() { echo "$MEM/projects/.usage/$1.json"; }
+usage_windows() { # engine -> "<used percent> <resets_at epoch>", one line per window reported
+  local f o; f="$(usage_file "$1")"; [ -s "$f" ] || return 0
+  grep -oE '"(five_hour|seven_day|primary|secondary)":[[:space:]]*\{[^}]*\}' "$f" | while IFS= read -r o; do
+    printf '%s %s\n' "$(printf '%s' "$o" | sed -nE 's/.*"used_percent(age)?":[[:space:]]*([0-9]+).*/\2/p')" \
+      "$(printf '%s' "$o" | sed -nE 's/.*"resets_at":[[:space:]]*([0-9]+).*/\1/p')"
+  done
+}
+limit_until() { # engine -> the epoch its subscription is usable again; non-zero when it is usable now
+  local used at back=0 now; now="$(date +%s)"
+  while read -r used at; do
+    [ "${used:-0}" -ge 100 ] && [ "${at:-0}" -gt "$now" ] && [ "$at" -gt "$back" ] && back="$at"
+  done < <(usage_windows "$1")
+  [ "$back" -gt 0 ] && echo "$back"
+}
+# ponytail: a limit is seen as a window at 100%. Both CLIs read that from the refusal's own
+# headers; if one ever stops reporting it there, the phase idles to the timeout as before.
+usage_poll() { # engine sandbox -> Codex's latest rate_limits line, copied out of the sandbox
+  [ "$1" = codex ] || return 0
+  local f; f="$(usage_file codex)"; mkdir -p "${f%/*}"
+  if sbx exec "$2" -- sh -c 'l=$(find "$HOME/.codex/sessions" -name "*.jsonl" -mmin -600 -exec ls -t {} + 2>/dev/null | head -1)
+      [ -n "$l" ] && grep "\"rate_limits\":{" "$l" | tail -1' > "$f.tmp" 2>/dev/null && [ -s "$f.tmp" ]; then mv "$f.tmp" "$f"; else rm -f "$f.tmp"; fi
+  return 0
+}
+at_hm() { date -r "$1" +%H:%M 2>/dev/null || date -d "@$1" +%H:%M; } # epoch -> local HH:MM (BSD, then GNU)
+# A subscription limit is the one stop with a known end, so it is waited out like a gate:
+# .waiting keeps brain watch from starting a second launcher, .limit tells the cockpit why.
+wait_limit() {
+  local back="$LIMIT_UNTIL"
+  info "$(engine_label "$LIMIT_ENGINE") reached its usage limit — '$PROJECT' carries on by itself after $(at_hm "$back"). Ctrl-C stops it."
+  notify "brain: $PROJECT paused on the $LIMIT_ENGINE usage limit until $(at_hm "$back")"
+  echo $$ > "$PDIR/.waiting"; echo "$LIMIT_ENGINE $back" > "$PDIR/.limit"
+  trap 'rm -f "$PDIR/.waiting" "$PDIR/.limit"; exit 130' INT TERM
+  while [ "$(date +%s)" -lt $((back + 60)) ]; do sleep 30; done
+  trap - INT TERM; rm -f "$PDIR/.waiting" "$PDIR/.limit"
+}
+
+launch() { # engine model effort prompt [role] [resume]
+  local engine="$1" model="$2" effort="$3" prompt="$4" role="${5:-}" resume="${6:-}"
   # Neither CLI fails on a bad effort: claude warns and uses its default, codex says
   # nothing at all, so a typo in roles.conf would quietly run the phase at default
   # effort. Checked against the union of both engines' values — the per-model limits
@@ -688,6 +734,18 @@ launch() { # engine model effort prompt [role]
         sbx exec "$SANDBOX" -- sh -c 'rm -f "$HOME/$1"' _ "$home_file" >/dev/null 2>&1 || true
       fi
     fi
+  fi
+  # Claude's statusline is where it reports the subscription's limits: written to a file
+  # the host and the cockpit read (usage_file). Single quotes only, so it is valid JSON as is.
+  if [ "$engine" = claude ]; then
+    local uf; uf="$(usage_file claude)"; mkdir -p "${uf%/*}"
+    case "$uf" in *[\'\"\\]*) ;; *) margs+=(--settings "{\"statusLine\":{\"type\":\"command\",\"command\":\"cat > '$uf.'\$\$ && mv '$uf.'\$\$ '$uf'\"}}") ;; esac
+  fi
+  # A phase a usage limit stopped goes on in the same conversation: the sandbox keeps it.
+  # A sandbox made since has none, and then it starts afresh (the prompt has the whole task).
+  if [ -n "$resume" ] && sbx exec "$SANDBOX" -- sh -c 'd="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"; [ "$1" = codex ] && d="$HOME/.codex/sessions"
+      [ -n "$(find "$d" -name "*.jsonl" 2>/dev/null | head -1)" ]' _ "$engine" >/dev/null 2>&1; then
+    case "$engine" in claude) margs+=(--continue) ;; codex) margs+=(resume --last) ;; esac
   fi
   # How each takes the opening prompt and still stays interactive, and runs without asking
   # for each tool: the sandbox is the boundary. (Claude's and Codex's templates start them
@@ -1847,6 +1905,19 @@ A human reopened this phase. Read the '## Feedback from the human' section at th
   [ -n "$engine" ] || engine="$r_engine"
   [ -n "$model" ]  || model="$r_model"
   [ -n "$effort" ] || effort="$r_effort"
+  # A subscription already at its limit: no attempt, just the time it is usable again.
+  local back
+  if back="$(limit_until "$engine")"; then
+    LIMIT_ENGINE="$engine"; LIMIT_UNTIL="$back"; RUN_STATUS=limited
+    return 4
+  fi
+  # The attempt a usage limit stopped (its .paused names the engine) is resumed, not redone.
+  local paused="$PDIR/phases/$phase.paused" resume=""
+  if [ "$(cat "$paused" 2>/dev/null)" = "$engine" ]; then
+    resume=1
+    task="Your previous attempt at this phase was stopped by the $(engine_label "$engine") usage limit, which has reset. Carry on where you stopped: what you already wrote is still there. The task is unchanged:
+$task"
+  fi
   # Host-only, write-once records live outside the memory mount. Record the prompt
   # before launch, including failed invocations and engines with no transcript.
   if [ "$run_mode" = review ]; then
@@ -1902,7 +1973,9 @@ $(phase_section "$phase")"
   # rather than because it finished. Both stops look identical to `sbx run`, so without
   # this the timeout would be indistinguishable from a clean phase.
   TIMEDOUT="$(mktemp -u "${TMPDIR:-/tmp}/brain-timeout.XXXXXX")"
-  trap 'rm -f "$MARK" "$STOPPED" "$TIMEDOUT"; [ -n "$STOPPER" ] && kill "$STOPPER" 2>/dev/null; true' EXIT INT TERM
+  # Written by the watcher, holding the reset time, when a subscription limit stopped it.
+  LIMITED="$(mktemp -u "${TMPDIR:-/tmp}/brain-limited.XXXXXX")"
+  trap 'rm -f "$MARK" "$STOPPED" "$TIMEDOUT" "$LIMITED"; [ -n "$STOPPER" ] && kill "$STOPPER" 2>/dev/null; true' EXIT INT TERM
 
   # Nobody should have to type /exit after every phase. The agent's last write is the
   # signal: when it lands, stop the sandbox and the attached session ends on its own.
@@ -1921,6 +1994,10 @@ $(phase_section "$phase")"
           # the transcript is the only place the reason for a hang is written down.
           info "'$phase' wrote no handoff file in ${PHASE_TIMEOUT}s — closing $sbname"
           : > "$TIMEDOUT"
+        elif [ $((waited % 30)) -eq 0 ] && usage_poll "$engine" "$sbname" && back="$(limit_until "$engine")"; then
+          # The agent sits idle at a limit until the timeout; stop it now and resume later.
+          info "$engine reached its usage limit — closing $sbname, '$phase' resumes after $(at_hm "$back")"
+          echo "$back" > "$LIMITED"
         else
           continue
         fi
@@ -1934,7 +2011,7 @@ $(phase_section "$phase")"
   fi
 
   local rc=0
-  launch "$engine" "$model" "$effort" "$prompt" "$role" || rc=$?
+  launch "$engine" "$model" "$effort" "$prompt" "$role" "$resume" || rc=$?
   [ -n "$STOPPER" ] && kill "$STOPPER" 2>/dev/null
   # The watcher writes the receipt before it stops the sandbox; this covers the run it
   # did not stop (BRAIN_AUTOSTOP=0, or a stop that failed), at the cost of a restart.
@@ -1949,6 +2026,8 @@ $(phase_section "$phase")"
   local outcome=incomplete
   if phase_finished "$phase" "$run_mode"; then outcome=handoff_valid; fi
   if [ -f "$TIMEDOUT" ] && [ "$outcome" = incomplete ]; then timedout=1; outcome=timed_out; fi
+  local lim_until; lim_until="$(cat "$LIMITED" 2>/dev/null)"
+  if [ -n "$lim_until" ] && [ "$outcome" = incomplete ]; then outcome=rate_limited; fi
   if [ "$rc" -ne 0 ] && [ ! -f "$STOPPED" ]; then outcome=engine_error; fi
   # Defects are checked on the host, now the agent has exited. A review that loses a
   # previous finding, or fails with nothing open, is not a handoff (phase-contract.sh).
@@ -2007,11 +2086,16 @@ $(phase_section "$phase")"
     [ ! -f "$run_dir/previous-summary.md" ] || cp -p "$run_dir/previous-summary.md" "$md"
     if [ -f "$run_dir/previous.log" ]; then cp -p "$run_dir/previous.log" "$PDIR/phases/$phase.log"; else rm -f "$PDIR/phases/$phase.log"; fi
   fi
-  rm -f "$MARK" "$STOPPED" "$TIMEDOUT"; trap - EXIT INT TERM
+  rm -f "$MARK" "$STOPPED" "$TIMEDOUT" "$LIMITED"; trap - EXIT INT TERM
+  if [ "$outcome" = rate_limited ]; then echo "$engine" > "$paused"; else rm -f "$paused"; fi
   # Commit either way: a phase that ran out of time still changed memory, and throwing
   # that away would lose the only record of how far it got.
   commit_memory "$PROJECT $phase"
   [ "$outcome" != engine_error ] || die "$engine exited with status $rc (record: $run_dir)"
+  if [ "$outcome" = rate_limited ]; then
+    LIMIT_ENGINE="$engine"; LIMIT_UNTIL="$lim_until"; RUN_STATUS=limited
+    return 4
+  fi
   if [ "$timedout" = 1 ]; then
     RUN_STATUS="timeout"
     info "'$phase' timed out. Read $md and the host record at $run_dir,"
@@ -2060,6 +2144,8 @@ cmd_auto() {
     [ "$rc" -eq 1 ] && continue
     [ "$rc" -eq 2 ] && return 2
     [ "$rc" -eq 3 ] && { notify "brain: $PROJECT timed out on '$before'"; return 3; }
+    # A usage limit is not a run that went nowhere: wait for the reset, then go on.
+    [ "$rc" -eq 4 ] && { wait_limit; continue; }
 
     if [ "$RUN_STATUS" = "gate" ]; then
       # An eval judges the work itself, so its gates pass as they come (brain eval run).
@@ -3318,7 +3404,7 @@ cmd_test() {
   new)         shift; cmd_new "$@" ;;
   playbook)    shift; cmd_playbook "$@" ;;
   role)        shift; cmd_role "$@" ;;
-  run)         shift; cmd_run "$@" ;;
+  run)         shift; while :; do rc=0; cmd_run "$@" || rc=$?; [ "$rc" -eq 4 ] || exit "$rc"; wait_limit; done ;;
   auto)        shift; cmd_auto ;;
   open)        shift; cmd_open "$@" ;;
   up)          shift; cmd_up "$@" ;;
