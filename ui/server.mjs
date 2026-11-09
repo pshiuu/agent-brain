@@ -101,7 +101,23 @@ for (const dir of [join(BRAIN, 'memory'), join(BRAIN, 'system'), join(BRAIN, '.d
   // Not memory/.watch being rewritten: brain watch does that every 2 seconds to say it is
   // listening, and passing it on rebuilt every open page every 2 seconds. Its creation and
   // removal are 'rename' events and still go out, so a watcher starting or stopping shows.
-  try { watch(dir, { recursive: true }, (ev, f) => { if (!(ev === 'change' && f === '.watch')) liveBump() }) } catch (e) { console.warn(`live updates off for ${dir}: ${e.message}`) }
+  watchTree(dir)
+}
+
+// App installation replaces entire folders. Linux recursive watchers can emit ENOENT
+// asynchronously during that replacement; try/catch around watch() cannot catch it.
+function watchTree (dir) {
+  let watcher
+  const retry = error => {
+    watcher?.close()
+    console.warn(`live updates restarting for ${dir}: ${error.message}`)
+    liveBump()
+    setTimeout(() => watchTree(dir), 1000).unref()
+  }
+  try {
+    watcher = watch(dir, { recursive: true }, (ev, f) => { if (!(ev === 'change' && f === '.watch')) liveBump() })
+    watcher.on('error', retry)
+  } catch (error) { retry(error) }
 }
 
 const routes = {
