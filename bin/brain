@@ -2799,7 +2799,7 @@ app_install() { # name [--from <git-url|owner/repo|dir> [path]] — install, or 
   if [ -d "$SYS/apps/$name" ]; then
     had=1
     busy="$(app_busy "$name" | sort -u | tr '\n' ' ')"
-    [ -z "$busy" ] || die "'$name' is in use by projects partway through its playbooks: $busy— finish them first"
+    [ -z "$busy" ] || die "'$name' is in use by projects partway through its playbooks: ${busy}— finish them first"
     # Installed before the base was kept: take the copy as it is for the base.
     [ -d "$base" ] || { mkdir -p "$(dirname "$base")"; cp -R "$SYS/apps/$name" "$base"; }
   fi
@@ -2897,7 +2897,7 @@ app_remove() { # name
   [ -n "$name" ] || die "usage: brain app remove <name>"
   [ -d "$SYS/apps/$name" ] || die "no app '$name' installed"
   busy="$(app_busy "$name" | sort -u | tr '\n' ' ')"
-  [ -z "$busy" ] || die "'$name' is in use by projects partway through its playbooks: $busy— finish them first"
+  [ -z "$busy" ] || die "'$name' is in use by projects partway through its playbooks: ${busy}— finish them first"
   users="$(for pb in $(names_in "$SYS/apps/$name/playbooks"); do playbook_projects "$pb"; done | sort -u | tr '\n' ' ')"
   [ -n "$users" ] && info "finished projects that ran its playbooks keep their record but cannot run again until it is back: $users"
   # What this brain learned into the app is not in git and not upstream: removing loses it.
