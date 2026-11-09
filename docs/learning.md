@@ -27,7 +27,8 @@ git -C ~/agent-brain checkout -- system       # the undo
 
 Naming the change on the command line *is* the approval, so that form needs no queue.
 
-The cockpit does the same moves without the editor. Every proposal on the Overview, and
+The cockpit does the same moves without the editor. Every proposal on the Studio's
+**Improvements** page (with **Apply accepted** for `brain evolve`), on Admin's Overview, and
 on each project's **Memory** tab (which also shows the knowledge pages, client profile
 and log entries that project left behind), has **Accept** and **Decline**. Decline moves
 the line under `## Declined`, which BRAIN.md tells agents to read before proposing, so a

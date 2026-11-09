@@ -14,8 +14,9 @@ One local server, two front ends on the same API:
   answered (`brain reject`, with the quote), or **Approve** (`brain approve`) — both
   start the next steps. **Copy** when the project wrote `content/article.md`; progress
   and brief for every project. **Adjust playbook** (on a finished project: **Feedback on
-  the playbook**) when a playbook's results do not come out as wished (below); and
-  **Clients**. A project page is built from the files the project has, not from its
+  the playbook**) when a playbook's results do not come out as wished (below);
+  **Improvements**, the agents' proposals in plain words, each with **Accept** and
+  **Decline**, and **Apply accepted** for `brain evolve`; and **Clients**. A project page is built from the files the project has, not from its
   area, so a new kind of work needs no Studio change; a tab for a new kind of output is
   one entry in `tabs` in `ui/public/studio.js`.
 - **Admin** at `/admin` — the engine room below: everything that is not running a

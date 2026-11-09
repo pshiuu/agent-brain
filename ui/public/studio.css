@@ -207,3 +207,17 @@ pre.plain { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.55 var(
 .muted { color: var(--muted); }
 a.cite { color: inherit; text-decoration: underline; text-decoration-color: var(--muted); text-underline-offset: 2px; white-space: nowrap; }
 a.cite:hover { text-decoration-color: var(--ink); }
+
+/* Improvements: one suggestion per row, its target and origin under it, the moves beside it. */
+.proposals { list-style: none; margin: 0; padding: 0; display: grid; }
+.proposal { display: flex; gap: 16px; align-items: flex-start; justify-content: space-between; padding: 14px 0; border-top: 1px solid var(--line-2); }
+.proposal:first-child { border-top: 0; padding-top: 0; }
+.proposal > div:first-child { min-width: 0; flex: 1; }
+.proposal > div:first-child > :first-child { margin-top: 0; }
+.proposal .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+.proposal .meta .chip { height: 24px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.proposal .bar { flex: none; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+@media (max-width: 640px) { .proposal { flex-direction: column; } .proposal .bar { justify-content: flex-start; } }
+
+.proposals .dim, .card .bar .dim { color: var(--muted); font-size: 12.5px; }
+.proposals summary, .card details > summary { cursor: pointer; color: var(--muted); }

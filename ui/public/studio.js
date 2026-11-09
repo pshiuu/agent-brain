@@ -171,6 +171,10 @@ function overview () {
   const parts = [head('Overview', sub), watchingNote(), baseUpdateNote(S, () => refresh().then(() => render())), stats].filter(Boolean)
   if (pend.length) parts.push(startingCard())
   if (usage) parts.push(usage)
+  if (S.proposals.Open.length) {
+    const n = S.proposals.Open.length
+    parts.push(card('Improvements', `The agents suggest ${n} change${n > 1 ? 's' : ''} to how they work.`, link('#/improve', 'btn', 'Review'), null))
+  }
   if (waiting.length) parts.push(card('Waiting for you', 'Open one, comment on the text, then approve it or send it back.', null, projectTable(waiting)))
   const adj = adjustments()
   if (adj.length) parts.push(card('Playbook changes', 'What you asked the AI to change. Look it over, then apply it or not.', null, table([['Playbook', ''], ['Status', '']], adj.map(d => {
@@ -604,6 +608,64 @@ function briefPanel (p) {
   return card('Brief', 'What every step reads first.', withIcon(link(`/admin#/project/${encodeURIComponent(p.name)}/brief`, 'btn'), 'note-pencil', 'Edit in Admin'), pad(b))
 }
 
+/* ---------- improvements the agents propose ---------- */
+/* memory/proposals.md, the same three lists Admin shows: agents file what they would change
+   in how they work, you accept or decline, and applying the accepted ones is `brain evolve`
+   (staged for brain watch). The file stays the record; the buttons move a line between its
+   headings, exactly as Admin's do. */
+function proposalItem (line, from) {
+  const m = line.replace(/^- /, '').match(/^\[([^\]]*)\]\s*([\s\S]*?)\s*(?:\(([a-z0-9][a-z0-9-]*),\s*(\d{4}-\d{2}-\d{2})\))?\s*$/)
+  const [, target = '', text = line.replace(/^- /, ''), project = '', date = ''] = m || []
+  const li = $('li', 'proposal'), body = $('div'), meta = $('div', 'meta'), bar = $('div', 'bar'), msg = $('span', 'err-text')
+  if (target) meta.append(withIcon($('span', 'chip'), 'wrench', target))
+  if (project) {
+    const p = S.projects.find(x => x.name === project)
+    meta.append(p ? link(`#/a/${encodeURIComponent(project)}`, 'chip', icon('folder'), $('span', '', titleOf(p))) : $('span', 'chip', project))
+  }
+  if (date) meta.append($('span', 'dim', ago(date)))
+  body.append(md(text), meta)
+  const moves = { Open: [['Accepted', 'Accept', 'primary', 'check'], ['Declined', 'Decline', 'quiet', 'x']], Accepted: [['Open', 'Undo', 'quiet', 'arrow-counter-clockwise']], Declined: [['Open', 'Reconsider', 'quiet', 'arrow-counter-clockwise']] }[from]
+  for (const [to, label, cls, ico] of moves) {
+    const b = btn(cls, ico, label)
+    b.onclick = async () => {
+      for (const x of bar.querySelectorAll('button')) x.disabled = true
+      msg.textContent = ''
+      try { await api('/api/proposal', { method: 'POST', body: { line, from, to } }); await refresh(); render({ keepScroll: scrollY }) }
+      catch (e) { msg.textContent = e.message; for (const x of bar.querySelectorAll('button')) x.disabled = false }
+    }
+    bar.append(b)
+  }
+  bar.append(msg)
+  li.append(body, bar)
+  return li
+}
+const proposalList = (lines, from) => { const ul = $('ul', 'proposals'); ul.append(...lines.map(l => proposalItem(l, from))); return ul }
+
+function improvementsView () {
+  const { Open, Accepted, Declined } = S.proposals
+  const crumbs = [['Improvements', '', 'lightbulb']]
+  const apply = btn('primary', 'magic-wand', `Apply ${Accepted.length} accepted`), msg = $('span', 'dim')
+  apply.disabled = !Accepted.length || S.evolvePending
+  msg.textContent = S.evolvePending ? 'Being applied. A window on the Mac may ask before anything changes.' : ''
+  apply.onclick = async () => {
+    apply.disabled = true
+    try { const r = await api('/api/evolve', { method: 'POST', body: {} }); msg.textContent = r.watching ? 'Being applied. A window on the Mac may ask before anything changes.' : 'Saved. It is applied as soon as the helper runs.'; await refresh() }
+    catch (e) { msg.textContent = e.message; apply.disabled = false }
+  }
+  const parts = [head('Improvements', 'What the agents learned while working, and would change in how they work. Accept what should change, decline what should not: nothing changes until you apply the accepted ones, and declined ones are not suggested again.'), watchingNote()]
+  parts.push(card('Waiting for you', Open.length ? `${Open.length} suggestion${Open.length > 1 ? 's' : ''} to look at.` : '', null,
+    Open.length ? pad(proposalList(Open, 'Open')) : empty('check-circle', 'Nothing waiting', 'New suggestions show up here when a project finishes a step.')))
+  if (Accepted.length || S.evolvePending) {
+    const bar = $('div', 'bar'); bar.append(apply, msg)
+    parts.push(card('Accepted', 'Applied together, in one go, when you say so.', bar, pad(proposalList(Accepted, 'Accepted'))))
+  }
+  if (Declined.length) {
+    const d = $('details', 'fold'); d.append($('summary', '', `Declined (${Declined.length})`), proposalList(Declined, 'Declined'))
+    parts.push(card('Declined', 'Kept so the agents know not to suggest them again.', null, pad(d)))
+  }
+  return frame(crumbs, [], ...parts)
+}
+
 /* ---------- adjusting a playbook ---------- */
 /* When a playbook's results do not come out as wished, say what should be different. The
    AI rewrites a copy of the playbook; you see what it changed and apply it, or not. */
@@ -691,7 +753,7 @@ function changes (d, p) {
    pages. Its code runs in this page with everything the Studio may do, which is why
    installing it asks for trust. It reads and stages through /api/app-read and
    /api/app-request, scoped on the server to its own projects and folder. */
-const BASE_ROUTES = new Set(['', 'articles', 'area', 'new', 'a', 'adjust'])
+const BASE_ROUTES = new Set(['', 'articles', 'area', 'new', 'a', 'adjust', 'improve'])
 const appRoutes = {}, appNavs = [], appExtensions = createExtensions()
 function kit (app) {
   const post = (path, body) => api(path, { method: 'POST', body: { app: app.name, ...body } })
@@ -740,7 +802,8 @@ function renderNav (active) {
   const waits = area => S.projects.filter(p => areaOf(p.playbook) === area && status(p).key === 'you').length
   nav.append(group('', '',
     item('#/', 'Overview', 'house', 'home', you, 'you'),
-    item('#/articles', 'All projects', 'files', 'articles', S.projects.length)))
+    item('#/articles', 'All projects', 'files', 'articles', S.projects.length),
+    item('#/improve', 'Improvements', 'lightbulb', 'improve', S.proposals.Open.length, 'you')))
   nav.append(group('Areas', 'areas', ...areas().map(a => item(areaHref(a), a, 'folder', `area:${toSlug(a)}`, waits(a), 'you'))))
   for (const g of appNavs) {
     try { nav.append(group(g.label, g.app, ...g.items().map(i => item(i.href, i.label, i.icon, i.key, i.n)))) } catch (e) { console.error(`app ${g.app}: ${e.message}`) }
@@ -753,7 +816,7 @@ function render (opts = {}) {
   // A project, its adjustment and a New form opened from an area light up that area.
   const inArea = key === 'a' ? S.projects.find(p => p.name === slug)?.playbook && `area:${toSlug(areaOf(S.projects.find(p => p.name === slug).playbook))}`
     : key === 'adjust' ? `area:${toSlug(areaOf(slug))}` : key === 'new' && areas().some(a => toSlug(a) === slug) ? `area:${slug}` : ''
-  const active = inArea || appRoutes[key]?.active(slug) || { '': 'home', articles: 'articles', area: `area:${slug}`, new: 'new' }[key] || 'home'
+  const active = inArea || appRoutes[key]?.active(slug) || { '': 'home', articles: 'articles', area: `area:${slug}`, new: 'new', improve: 'improve' }[key] || 'home'
   renderNav(active)
   let el
   try {
@@ -762,6 +825,7 @@ function render (opts = {}) {
       : key === 'a' ? projectView(slug, sub)
         : key === 'adjust' ? adjustView(slug, decodeURIComponent(sub))
         : key === 'articles' ? projectsView()
+        : key === 'improve' ? improvementsView()
         : key === 'area' ? projectsView(slug)
           : overview()
   } catch (e) { el = frame([['Studio']], [], note('err', 'warning-circle', e.message)) }
