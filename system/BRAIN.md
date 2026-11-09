@@ -186,8 +186,11 @@ ids like `design-gate.r2-1`. Answer each one the same way.
 
 ## Rules
 - Prefer deterministic checks (build, typecheck, lint, tests, brain-shoot) over opinions.
-- Never commit secrets. Never push to main. Commit work in small commits on a branch
-  named `brain/<phase>`.
+- Never commit secrets or build output, and never push to main. Which branch you work
+  on, how it is named and how commits are written is the project's: the `## Git` section
+  of its brief, else the git skill an installed app brings (the github app's
+  `git-workflow`). With neither, commit in small commits on a branch named
+  `brain/<phase>`.
 - Never assume a stack. Take it from the brief; if the brief is silent, read it out
   of the repo (manifest, lockfile, config) and write what you found into
   `decisions.md`. If neither says and the choice is expensive to undo, ask.

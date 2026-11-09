@@ -145,8 +145,8 @@ disagree about the default: settle it by running the role without the line.
 - Hand off through files, not chat: write `phases/<phase>.md` with what you did, where
   the outputs are, open questions, and what the next role must know.
 - Real decisions go in `decisions.md` as `YYYY-MM-DD — decision — reason`.
-- Commit in small commits on branch `brain/<phase>`. Never push to main, never commit
-  secrets.
+- Commit in small commits on the branch the project's git conventions name (BRAIN.md,
+  Rules). Never push to main, never commit secrets or build output.
 - `$BRAIN_SYSTEM` is read-only. Suggestions for it go under `## Open` in `proposals.md`.
 - **A review role never edits.** It writes `RESULT: PASS` or `RESULT: FAIL` plus a
   numbered fix list, appends `YYYY-MM-DD PASS|FAIL` to `phases/<phase>.log`, and creates
