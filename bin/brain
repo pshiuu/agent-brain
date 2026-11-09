@@ -2866,16 +2866,46 @@ app_revert() { # name [file...] -> back to the installed version: every file, or
 }
 
 # For the app's developer: this brain's changes, or the files named, merged into a checkout of
-# the apps repo (APPS_DEV in brain.conf). Nothing is committed or pushed — that stays a person's
-# decision, after reading the diff there. Everyone else gets it with their next update.
+# the repo the app came from. APPS_DEV in brain.conf lists the developer's checkouts (one, or
+# several separated by spaces or colons: the public apps repo and a private one); promote
+# takes the one whose origin is the app's source in apps.lock, or the source itself when it
+# was a local folder. Never another repo: an app promoted into the wrong one would publish it.
+# Nothing is committed or pushed — that stays a person's decision, after reading the diff
+# there. Everyone else gets it with their next update.
+repo_id() { # git URL, owner/repo or folder -> owner/repo, or the folder's absolute path
+  local r="${1%/}"
+  if [ -d "${r/#\~/$HOME}" ]; then (cd "${r/#\~/$HOME}" && pwd -P); return; fi
+  r="${r%.git}"; r="${r#https://github.com/}"; r="${r#http://github.com/}"; r="${r#git@github.com:}"; r="${r#ssh://git@github.com/}"
+  echo "$r"
+}
+
+app_dev_checkout() { # name -> the developer's checkout of the repo the app was installed from
+  local src want d dev found="" candidate
+  read -r _ src _ _ < <(awk -v n="$1" '$1 == n' "$SYS/apps.lock")
+  [ -n "$src" ] || die "'$1' has no line in system/apps.lock"
+  want="$(repo_id "$src")"
+  # Installed from a local checkout: that is the developer's copy.
+  case "$want" in /*) git -C "$want" rev-parse --git-dir >/dev/null 2>&1 && { echo "$want"; return; } ;; esac
+  dev="$(setting APPS_DEV "")"
+  [ -n "$dev" ] || die "promote is for an app's developer: set APPS_DEV in system/brain.local.conf to your checkout of $src"
+  for d in ${dev//:/ }; do
+    d="${d/#\~/$HOME}"
+    git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || continue
+    if [ "$(repo_id "$(git -C "$d" remote get-url origin 2>/dev/null)")" = "$want" ]; then
+      candidate="$(git -C "$d" rev-parse --show-toplevel)"
+      [ -z "$found" ] || [ "$found" = "$candidate" ] || die "several APPS_DEV checkouts match $src — keep one checkout of this source in APPS_DEV"
+      found="$candidate"
+    fi
+  done
+  [ -z "$found" ] || { echo "$found"; return; }
+  die "none of APPS_DEV ($dev) is a checkout of $src, where '$1' came from — clone it and add it to APPS_DEV in system/brain.local.conf"
+}
+
 app_promote() { # name [file...]
   local name="${1:-}" dev path B out conflicts
   [ -n "$name" ] || die "usage: brain app promote <name> [file...]"; shift
-  dev="$(setting APPS_DEV "")"
-  [ -n "$dev" ] || die "promote is for an app's developer: set APPS_DEV in system/brain.local.conf to your checkout of the apps repo"
-  dev="${dev/#\~/$HOME}"
-  [ -d "$dev/.git" ] || die "APPS_DEV=$dev is not a git checkout"
   [ -d "$SYS/apps/$name" ] || die "no app '$name' installed"
+  dev="$(app_dev_checkout "$name")" || exit 1
   read -r _ _ _ path < <(awk -v n="$name" '$1 == n' "$SYS/apps.lock"); [ "$path" = . ] && path=""
   [ -d "$dev/${path:-.}" ] || die "no folder '${path:-.}' in $dev"
   B="$(app_base "$name")"; [ -d "$B" ] || die "'$name' has no base copy to compare with"

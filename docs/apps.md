@@ -58,7 +58,7 @@ Roles page change the installed copy in `system/apps/<name>/`, and the untouched
 brain app diff seo                  # what this brain changed in the app
 brain app revert seo [file]         # drop those changes
 brain app update seo                # the new version, merged with yours; stops on a real conflict
-brain app promote seo [file]        # app developers: into the apps repo (APPS_DEV), to push
+brain app promote seo [file]        # app developers: into a checkout matching its installed source, to review
 ```
 
 **What an app may declare.** Besides its roles, playbooks and skills, an app's `app.conf`
@@ -136,3 +136,7 @@ Two playbooks, four roles and one skill that they share. Each article is a proje
   key is never written to a file in the brain. The same page switches each use on or off —
   volume and difficulty, the live SERP, what AI engines answer — in `system/config/seo.conf`;
   a use that is off is researched as if DataForSEO were not connected.
+
+`APPS_DEV` can list checkouts separated by spaces or colons. Promotion matches each
+checkout’s origin against the app’s recorded source, and refuses unrelated or
+ambiguous matches. An app installed from a local checkout promotes back there.

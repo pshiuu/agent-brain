@@ -97,12 +97,36 @@ no "a file upstream deleted and this brain left alone goes" test -e "$SYS/apps/s
 section "diff, revert, promote"
 printf "promote me\n" >> "$SYS/apps/seo/roles/seo-writer.md"
 has "$(app_diff seo)" "+promote me" "diff shows this brain's change"
+# Installed from a published repo: promote goes into the developer's checkout of that repo,
+# picked by its origin among APPS_DEV's, and never into a checkout of another one.
+cp "$SYS/apps.lock" "$T/apps.lock.real"
+sed -i.x "s#^seo [^ ]*#seo example/apps-repo#" "$SYS/apps.lock"
 no "promote needs APPS_DEV" app_promote seo
-git clone -q "$SRC" "$T/dev"
-printf "APPS_DEV=%s\n" "$T/dev" >> "$SYS/brain.conf"
+git clone -q "$SRC" "$T/dev"; git -C "$T/dev" remote set-url origin https://github.com/example/apps-repo.git
+git clone -q "$SRC" "$T/other"; git -C "$T/other" remote set-url origin git@github.com:example/private-apps.git
+printf "APPS_DEV=%s\n" "$T/other" > "$SYS/brain.local.conf"
+no "promote refuses when no checkout in APPS_DEV is of the app's repo" app_promote seo
+rm "$SYS/brain.local.conf"
+printf "APPS_DEV=%s:%s\n" "$T/other" "$T/dev" >> "$SYS/brain.conf"
 app_promote seo roles/seo-writer.md >/dev/null 2>&1
-has "$(cat "$T/dev/seo/roles/seo-writer.md")" "promote me" "promote writes the change into the developer's checkout"
+has "$(cat "$T/dev/seo/roles/seo-writer.md")" "promote me" "promote writes the change into the checkout of the repo it came from"
 is "$(git -C "$T/dev" status --porcelain | awk "{print \$2}")" "seo/roles/seo-writer.md" "and nothing else, uncommitted"
+is "$(git -C "$T/other" status --porcelain)" "" "and nothing into the checkout of another repo"
+git clone -q "$SRC" "$T/twin"; git -C "$T/twin" remote set-url origin git@github.com:example/apps-repo.git
+printf 'APPS_DEV=%s:%s\n' "$T/dev" "$T/twin" > "$SYS/brain.local.conf"
+no "promote refuses two matching checkouts rather than guessing" app_promote seo
+rm "$SYS/brain.local.conf"
+# Installed from a local checkout (the developer's own install --from): that checkout.
+cp "$T/apps.lock.real" "$SYS/apps.lock"
+app_promote seo roles/seo-writer.md >/dev/null 2>&1
+has "$(cat "$SRC/seo/roles/seo-writer.md")" "promote me" "installed from a local folder, promote writes into that folder"
+git -C "$SRC" checkout -q -- .
+printf 'seo %s - .\n' "$SRC/seo" > "$SYS/apps.lock"
+app_promote seo roles/seo-writer.md >/dev/null 2>&1
+has "$(cat "$SRC/seo/roles/seo-writer.md")" "promote me" "a local app subfolder promotes into that folder, not the repository root"
+no "no app files leak into the local repository root" test -e "$SRC/roles/seo-writer.md"
+cp "$T/apps.lock.real" "$SYS/apps.lock"
+git -C "$SRC" checkout -q -- .
 app_revert seo >/dev/null 2>&1
 is "$(app_changes seo)" "" "revert with no file goes back to the installed version"
 printf "x\n" >> "$SYS/apps/seo/roles/seo-writer.md"
