@@ -130,7 +130,9 @@ the cockpit's real `appRead` (the academy's `test/ui.test.mjs` does).
 
 Admin → Apps lists the installed apps and what `APPS_SOURCE` offers (`memory/.apps-catalog`,
 written by `brain watch` / `brain app catalog`: version, label, the first paragraph of the
-README, and whether the app brings Studio code, commands or settings). Install, update,
+README, and whether the app brings Studio code, commands or settings). An app installed from
+anywhere else (a private repo, a developer's folder) is checked against that source by the
+same **Check for updates** (`memory/.apps-updates`), and its Update comes from there too. Install, update,
 revert and remove are staged as `memory/.apps-request` and run by `brain watch`; the trust
 question becomes a confirm dialog. Install from a repo scans any other repo
 (`scan <source>` → `memory/.apps-scan`, same format) and installs what it found with

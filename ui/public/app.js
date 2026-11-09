@@ -1275,12 +1275,14 @@ function appTile (name, ico, size = 44) {
   t.append(icon(ico || 'puzzle-piece')); t.style.fontSize = `${Math.round(size * 0.5)}px`
   return t
 }
-// Installed and offered, one list: an installed app's own copy wins, the catalog adds the update flag.
+// Installed and offered, one list: an installed app's own copy wins, the catalog adds the update
+// flag, and an app from a source of its own gets it from that source's check (S.store.updates).
 function storeApps () {
   const cat = S.store.catalog?.apps || []
   const mine = S.apps.map(a => {
-    const c = cat.find(x => x.name === a.name)
-    return { name: a.name, label: a.label, icon: a.icon, version: a.version, desc: a.desc || c?.desc || '', installed: a, update: !!c?.update, flags: c?.flags || [...(a.main ? ['code'] : []), ...(a.config.secrets.length || a.config.settings.length ? ['settings'] : [])] }
+    const c = cat.find(x => x.name === a.name), u = S.store.updates?.[a.name]
+    return { name: a.name, label: a.label, icon: a.icon, version: a.version, desc: a.desc || c?.desc || '', installed: a, update: !!c?.update || u?.state === 'yes',
+      next: u?.state === 'yes' ? u.version : c?.update ? c.version : '', unreachable: u?.state === 'error' ? u.source : '', flags: c?.flags || [...(a.main ? ['code'] : []), ...(a.config.secrets.length || a.config.settings.length ? ['settings'] : [])] }
   })
   // A repo the human scanned offers its apps too, ahead of the catalog's of the same name: they asked for it.
   const scan = (S.store.scan?.apps || []).map(c => ({ ...c, source: S.store.scan.source }))
@@ -1416,7 +1418,8 @@ function appPage (name) {
   t.append($('h1', '', a.label), $('p', 'sub', [`v${a.version}`, a.installed ? `installed in ${a.installed.dir}` : a.source ? `not installed · from ${a.source}` : 'not installed',
     a.installed?.lock ? `from ${a.installed.lock.source} @ ${a.installed.lock.commit.slice(0, 12)}` : ''].filter(Boolean).join(' · ')))
   const tags = $('div', 'store-tags')
-  if (a.update) tags.append($('span', 'tag warn', 'Update available'))
+  if (a.update) tags.append($('span', 'tag warn', `Update available${a.next && a.next !== a.version ? `: v${a.next}` : ''}`))
+  if (a.unreachable) tags.append($('span', 'tag err', `Could not check ${a.unreachable} for updates`))
   if (a.installed?.changes) tags.append($('span', 'tag', `${a.installed.changes} file${a.installed.changes > 1 ? 's' : ''} changed by this brain`))
   for (const f of a.flags) tags.append($('span', 'tag', flagText(f)))
   t.append(tags)

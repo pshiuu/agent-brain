@@ -2872,6 +2872,28 @@ app_catalog() { # [source out]
   rm -rf "$out.d"; mv "$out.d.tmp" "$out.d"
   [ -n "$tmp" ] && rm -rf "$tmp"
   info "$(grep -vc '^#' "$out") app(s) in $src (${commit:0:12})"
+  # The apps repo's check is everyone's; the rest of the installed apps come from elsewhere.
+  [ -n "${1:-}" ] || app_updates
+}
+
+# Every installed app from a source other than APPS_SOURCE (a private repo, a developer's
+# folder), checked against that source the way app_catalog checks the apps repo's own:
+# memory/.apps-updates, one "name<TAB>version there<TAB>source<TAB>yes|no|error" line each.
+# A source that cannot be reached is an error on its line, never the end of the check.
+# ponytail: one fetch per app, so two apps from one private repo clone it twice.
+app_updates() {
+  local main name src commit path tmp upd ver out="$MEM/.apps-updates"
+  main="$(setting APPS_SOURCE pshiuu/agent-brain-apps)"; tmp="$(mktemp -d)"
+  while read -r name src commit path; do
+    [ -n "$name" ] && [ -n "$src" ] && [ "$src" != "$main" ] && [ -d "$SYS/apps/$name" ] || continue
+    if ( notify() { :; }; app_fetch "$name" "$src" "${path:-$name}" "$tmp/$name" ) >/dev/null 2>&1 </dev/null; then
+      if diff -rq -x .git "$tmp/$name" "$(app_base "$name")" >/dev/null 2>&1; then upd=no; else upd=yes; fi
+      ver="$(app_field "$tmp/$name" version)"
+    else upd=error; ver=-; fi
+    printf '%s\t%s\t%s\t%s\n' "$name" "${ver:--}" "$src" "$upd"
+  done < "$SYS/apps.lock" > "$out.tmp" 2>/dev/null && mv "$out.tmp" "$out"
+  rm -rf "$tmp" "$out.tmp"
+  return 0
 }
 
 # A source the Studio may name: owner/repo on GitHub or a git URL over https or ssh. Not a
@@ -3160,7 +3182,8 @@ cmd_app() {
     remove)  app_remove "$@" ;;
     forget)  app_forget "$@" ;;
     check)   [ -n "${1:-}" ] || die "usage: brain app check <name|dir>"; app_check_report "$1" ;;
-    catalog) app_catalog; grep -v '^#' "$MEM/.apps-catalog" | awk -F '\t' '{ printf "  %-14s %-9s %s%s\n", $1, $2, $3, ($6 == "yes" ? "   (update available)" : "") }' ;;
+    catalog) app_catalog; grep -v '^#' "$MEM/.apps-catalog" | awk -F '\t' '{ printf "  %-14s %-9s %s%s\n", $1, $2, $3, ($6 == "yes" ? "   (update available)" : "") }'
+             awk -F '\t' '$4 != "no" { printf "  %-14s %-9s from %s%s\n", $1, $2, $3, ($4 == "yes" ? "   (update available)" : "   (could not reach it)") }' "$MEM/.apps-updates" 2>/dev/null ;;
     test)    app_test "$@" ;;
     *) die "usage: brain app list | install|update <name> [--from <git-url|owner/repo|dir> [path]] | diff|revert <name> [file...] | promote <name> [file...] | remove <name> | forget <name> | check <name|dir> | test [name] | catalog" ;;
   esac

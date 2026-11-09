@@ -1774,6 +1774,11 @@ export function appStore () {
   return {
     catalog: appCatalog('.apps-catalog'),
     scan: appCatalog('.apps-scan'),
+    // Installed apps from a source of their own (a private repo, a developer's folder),
+    // each checked against it by brain watch: bin/brain app_updates.
+    updates: Object.fromEntries((read(join(MEM, '.apps-updates')) || '').split('\n').filter(Boolean).map(l => {
+      const [name, version, source, state] = l.split('\t'); return [name, { version, source, state }]
+    })),
     status: head ? { ok: ok === 'ok', verb, name, at: when.join(' '), log: log.join('\n').trim() } : null,
     pending: (read(join(MEM, '.apps-request')) || '').trim() || null,
     running: (read(join(MEM, '.apps-running')) || '').trim() || null

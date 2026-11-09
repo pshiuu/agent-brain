@@ -347,6 +347,21 @@ eval "$real_source_ok"
 for a in mine extra; do rm -rf "$SYS/apps/$a" "$SYS/apps/.base/$a"; sed -i.bak "/^$a /d" "$SYS/apps.lock"; done
 rm -rf "$SYS/apps/paint" "$SYS/apps/.base/paint" "$SYS/brain.conf"; sed -i.bak '/^paint /d' "$SYS/apps.lock"
 
+section "check for updates: every app against the source it came from"
+mkdir -p "$T/own/solo"; printf 'name solo\nversion 1.0.0\nbrain >= 2\n' > "$T/own/solo/app.conf"
+app_install solo --from "$T/own" solo >/dev/null 2>&1
+app_updates
+is "$(awk -F '\t' '$1 == "solo" { print $4 }' "$MEM/.apps-updates")" no "an app from a folder of its own, unchanged there: no update"
+printf 'name solo\nversion 1.1.0\nbrain >= 2\n' > "$T/own/solo/app.conf"
+app_updates
+is "$(awk -F '\t' '$1 == "solo" { print $4 " " $2 }' "$MEM/.apps-updates")" "yes 1.1.0" "changed there: an update, with its version"
+hasnt "$(cat "$MEM/.apps-updates")" "seo	" "an app from the apps repo is the catalog's to check, not this"
+mkdir -p "$SYS/apps/ghost"; printf 'ghost %s - ghost\n' "$T/gone" >> "$SYS/apps.lock"
+app_updates
+is "$(awk -F '\t' '$1 == "ghost" { print $4 }' "$MEM/.apps-updates")" error "a source that is gone is an error on its line"
+is "$(awk -F '\t' '$1 == "solo" { print $4 }' "$MEM/.apps-updates")" yes "and the rest are still checked"
+for a in solo ghost; do rm -rf "$SYS/apps/$a" "$SYS/apps/.base/$a"; sed -i.bak "/^$a /d" "$SYS/apps.lock"; done
+
 section "app test runs the app's own tests"
 mkdir -p "$SYS/apps/studio/test"; printf 'exit 0\n' > "$SYS/apps/studio/test/ok.sh"
 yes "a passing app test" app_test studio
