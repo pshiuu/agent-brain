@@ -181,3 +181,52 @@ by `APPS_DEV` — to read, commit and push, so everyone gets them with their nex
    while you build it — a local folder installs without a repo.
 2. Name roles and playbooks for the app (`seo-writer`, not `writer`): names are global.
 3. `brain app check <dir>` until it passes, then `brain app test <name>`.
+
+
+## App-owned memory
+
+The Studio kit also supports `read(null, paths, 'data')` to read
+`memory/apps/<app>/`, and `request(null, '.<app>-request', { content })`
+to stage an app-wide request there. A pending or claimed request returns 409.
+The host app watcher claims and validates it; the Studio never executes host commands.
+Use this for workspace registries and context shared by tasks on one app checkout,
+while keeping each task's brief and phase evidence in `memory/projects/<task>/`.
+
+Promotion resolves the installed source against APPS_DEV checkouts (space or colon
+separated), and refuses an unrelated or ambiguous checkout. A local source promotes
+back to its original folder.
+
+
+## Optional project integrations and workspace catalogues
+
+A host-created project may declare `INTEGRATIONS=agencyos-sync` in project.env.
+For several providers, quote the value: `INTEGRATIONS='app-one app-two'`.
+Before each `brain run` phase, the launcher calls `<app>_project_check <project>`
+from that installed app's cli.sh. Nonzero prevents engine launch. Removing a linked
+integration therefore requires unlinking the project explicitly first. Unlinked
+projects remain independent. Hooks must start with the app's name and be read-only
+checks; updates remain staged requests. The header points engines to the project's
+`integration-context.md`. Both engines receive the same context.
+
+An explicitly linked integration may use the ordinary kit read/request methods for
+that project's memory; it gains no access to unlinked projects.
+
+A domain app may declare `workspaces <relative-json-path>` in app.conf. Its host code
+maintains that JSON in its app data folder, as a list of `{id,label,path,kind,playbooks}`.
+Paths identify local code folders, not credentials or commands. Consumers revalidate
+the path against their configured workspace roots and discover available playbooks
+from installed apps. Catalogues are optional suggestions, never a hard dependency.
+
+
+## Optional Studio panels
+
+`kit.provide(slot, render)` registers this app once for a named panel slot. The render
+function receives a frozen context and returns a DOM node, null, or a promise. It uses
+its own kit for scoped reads and staged requests. `await kit.contributions(slot, context)`
+returns `{app,content}` or `{app,error}` for each installed provider; one provider failure
+does not break another. With no provider installed the result is an empty list.
+
+The `workspace-tasks` slot receives `{path,kind,label}` for the selected code checkout.
+Domain apps render contributed panels beside their own local execution history. The
+provider owns remote task identity, task routing, workflow selection and update checks;
+the domain app does not import private integration code or copy its remote task database.

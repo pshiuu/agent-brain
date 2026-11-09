@@ -2346,18 +2346,26 @@ function appProject (app, project) {
   const a = installedApp(app)
   if (!PLAYBOOK_NAME.test(String(project || ''))) throw new HttpError(400, 'bad project name')
   const env = parseEnv(read(join(MEM, 'projects', project, 'project.env')))
-  const mine = a.kind ? env.KIND === a.kind : !env.KIND && !!env.PLAYBOOK && appOf((inRoots(`playbooks/${env.PLAYBOOK}`) || '') + '/') === app
+  const linked = String(env.INTEGRATIONS || '').split(/\s+/).includes(app)
+  const mine = linked || (a.kind ? env.KIND === a.kind : !env.KIND && !!env.PLAYBOOK && appOf((inRoots(`playbooks/${env.PLAYBOOK}`) || '') + '/') === app)
   if (!mine) throw new HttpError(404, `'${project}' is not a project of the ${app} app`)
   return { env, mem: join(MEM, 'projects', project), work: workRoot(env) }
 }
 const SHOWN = /\.(md|bib|txt|json|csv|ya?ml)$/i
+/** An app's own memory, memory/apps/<app>/: what it keeps beyond any one project (the
+ *  Frappe app's benches and its per-app knowledge). Its cli.sh writes it; the Studio reads it
+ *  and stages requests there with no project named. */
+const appData = app => join(MEM, 'apps', installedApp(app).name)
+
 /** Files and folders, many in one call: a folder (`dir/`) as its entries, a text file with
  *  its content, anything else as its size. Missing is null. `where` is the workspace
- *  (`work`), the project's memory folder (`memory`) or the app's own folder (`app`). */
+ *  (`work`), the project's memory folder (`memory`), the app's own folder (`app`) or the
+ *  app's own memory (`data`, no project). */
 export function appRead ({ app, project, paths = [], where = 'work' }) {
   if (!Array.isArray(paths) || paths.length > 2000) throw new HttpError(400, 'paths is a list of at most 2000')
   let root
   if (where === 'app') root = join(BRAIN, installedApp(app).dir)
+  else if (where === 'data') root = appData(app)
   else {
     const { env, mem, work } = appProject(app, project)
     root = where === 'memory' ? mem : work
@@ -2382,9 +2390,20 @@ export function appRead ({ app, project, paths = [], where = 'work' }) {
  *  project: a new project of the app's kind, its `files` written beside the request. */
 export function appRequest ({ app, project, file, content, data, prev, against, new: name, files = {} }) {
   if (name !== undefined) return appNew(app, name, files)
-  const { mem, work } = appProject(app, project)
   const f = String(file || '')
   const req = `.${app}-request`
+  // No project: the app's own memory. Its request (one at a time) or a staged file, for its cli.sh.
+  if (project === undefined || project === null) {
+    const root = appData(app)
+    if (!(f === req || /^[a-z0-9-]+\.staged$/.test(f))) throw new HttpError(400, `the Studio stages ${req} or <name>.staged in the app's memory — not '${f}'`)
+    if (f === req && (existsSync(join(root, req)) || existsSync(join(root, `${req}.taken`)))) {
+      throw new HttpError(409, 'a request is already waiting — it is picked up within seconds while brain watch runs')
+    }
+    mkdirSync(root, { recursive: true })
+    writeAtomic(safePath(f, root), String(content ?? ''))
+    return { staged: f, watching: watching() }
+  }
+  const { mem, work } = appProject(app, project)
   if (!(f === req || /^inbox\/[A-Za-z0-9_][A-Za-z0-9._ -]*$/.test(f) || /^[a-z0-9-]+\.staged$/.test(f))) {
     throw new HttpError(400, `the Studio stages ${req}, inbox/<file> or <name>.staged — not '${f}'`)
   }

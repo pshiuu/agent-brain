@@ -7,6 +7,7 @@ import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+const { createExtensions } = await import('data:text/javascript;base64,' + Buffer.from(readFileSync(new URL('./public/extensions.js', import.meta.url))).toString('base64'))
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..')
 const FIX = mkdtempSync(join(tmpdir(), 'brain-test-'))
 cpSync(join(REPO, 'system'), join(FIX, 'system'), { recursive: true })
@@ -61,6 +62,17 @@ const ph = e => join(FIX, 'memory/projects/demo/phases/code-review' + e)
 
 let n = 0
 const it = (name, fn) => { fn(); console.log(`  ok  ${name}`); n++ }
+{
+  const panels = createExtensions()
+  assert.deepEqual(await panels.render('workspace-tasks', {}), [])
+  panels.provide('tasks', 'workspace-tasks', context => context.path)
+  panels.provide('broken', 'workspace-tasks', () => { throw new Error('offline') })
+  const result = await panels.render('workspace-tasks', { path: '/workspace' })
+  assert.equal(result[0].content, '/workspace')
+  assert.equal(result[1].error, 'offline')
+  assert.throws(() => panels.provide('tasks', 'workspace-tasks', () => null), /already provides/)
+  assert.throws(() => panels.provide('../bad', 'workspace-tasks', () => null), /Invalid/)
+}
 const throws = (fn, re) => assert.throws(fn, e => re.test(e.message), `expected ${re}`)
 
 console.log('path guard')
@@ -1052,6 +1064,15 @@ console.log('app pages: the scoped reader and the request stager')
     assert.match(b.appRead({ app: 'academy', paths: ['skills/academy/workspace/profile.md'], where: 'app' }).files['skills/academy/workspace/profile.md'].content, /## Project/)
     throws(() => b.appRead({ app: 'academy', project: 'demo', paths: ['x'] }), /not a project of the academy app/)
     throws(() => b.appRead({ app: 'nope', project: 'zz-thesis', paths: [] }), /no app 'nope'/)
+  })
+  it('an optional integration can read only an explicitly linked playbook project', () => {
+    const env = join(FIX, 'memory/projects/demo/project.env')
+    const original = readFileSync(env, 'utf8')
+    writeFileSync(env, original + '\nINTEGRATIONS=academy\n')
+    const result = b.appRead({ app: 'academy', project: 'demo', paths: ['project.env'], where: 'memory' })
+    assert.ok(result.files['project.env'].size > 0)
+    writeFileSync(env, original)
+    throws(() => b.appRead({ app: 'academy', project: 'demo', paths: ['project.env'], where: 'memory' }), /not a project/)
   })
   it('stages a run request, one at a time, files for the inbox and checked edits — only into memory/', () => {
     b.appRequest({ app: 'academy', project: 'zz-thesis', file: '.academy-request', content: 'talk\neditor\ncritique\nmy question\n' })

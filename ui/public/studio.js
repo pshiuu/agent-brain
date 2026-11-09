@@ -1,3 +1,4 @@
+import { createExtensions } from './extensions.js'
 /* Studio: the front end for the people the work is for. Projects grouped by area (the
    `Area:` line of their playbook: Content, Websites, …), what waits on you, the review
    with comments on the text, the copy for the CMS, adjusting a playbook in words, and
@@ -687,11 +688,13 @@ function changes (d, p) {
    installing it asks for trust. It reads and stages through /api/app-read and
    /api/app-request, scoped on the server to its own projects and folder. */
 const BASE_ROUTES = new Set(['', 'articles', 'area', 'new', 'a', 'adjust'])
-const appRoutes = {}, appNavs = []
+const appRoutes = {}, appNavs = [], appExtensions = createExtensions()
 function kit (app) {
   const post = (path, body) => api(path, { method: 'POST', body: { app: app.name, ...body } })
   return {
     app: app.name,
+    provide: (slot, render) => appExtensions.provide(app.name, slot, render),
+    contributions: (slot, context) => appExtensions.render(slot, context),
     get state () { return S },
     refresh, render,
     /** #/<key>/<slug>/<sub>/<rest> renders fn(slug, sub, rest); active(slug) names the nav item it lights up. */
@@ -799,7 +802,7 @@ function live () {
     S = next; render({ keepScroll: scrollY })
   }
 }
-const appCode = st => JSON.stringify(st.apps.filter(a => a.main).map(a => [a.name, a.lock?.commit]))
+const appCode = st => JSON.stringify(st.apps.filter(a => a.main).map(a => [a.name, a.lock?.commit, a.version]))
 
 addEventListener('hashchange', () => { if (fresh) { fresh.remove(); fresh = null } render() })
 view.append($('div', 'skel'), $('div', 'skel'), $('div', 'skel'))

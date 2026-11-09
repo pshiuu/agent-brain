@@ -296,6 +296,7 @@ load_project() {
   PDIR="$MEM/projects/$PROJECT"
   [ -f "$PDIR/project.env" ] || die "no brain project for '$PROJECT'. Create one with: brain new <playbook> $PROJECT --dir $PWD"
   # shellcheck disable=SC1091
+  INTEGRATIONS=""
   source "$PDIR/project.env"
   if [ -n "${KIND:-}" ]; then
     local app; app="$(kind_app "$KIND")" || die "'$PROJECT' is KIND=$KIND, which no installed app owns — install that app (brain app install $KIND)"
@@ -304,6 +305,18 @@ load_project() {
   CLIENT="${CLIENT:-}"; clients_on || CLIENT=""
   PHASES_FILE="$(playbook_dir "$PLAYBOOK")/phases"
   [ -f "$PHASES_FILE" ] || die "playbook '$PLAYBOOK' has no phases file"
+}
+
+# Optional apps can supply task context and check their linked work before any engine runs.
+# A project opts in explicitly; an unlinked project has no integration dependency.
+project_integrations_check() {
+  local integration
+  for integration in ${INTEGRATIONS:-}; do
+    [[ "$integration" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { info "invalid project integration name"; return 1; }
+    app_cli "$integration" || { info "install the linked $integration app before running this project"; return 1; }
+    declare -F "${integration}_project_check" >/dev/null || { info "$integration has no project-check hook"; return 1; }
+    "${integration}_project_check" "$PROJECT" || return 1
+  done
 }
 
 phase_lines() { awk '$1 !~ /^#/ && NF >= 2' "$PHASES_FILE"; }
@@ -700,6 +713,9 @@ Knowledge scope: $scope — in index.md, read only the Knowledge sections tagged
 EOF
   [ -z "$ak" ] || echo "App knowledge (read-only, shipped with the apps): $ak — open the pages there that fit your task."
   echo "First read $SYS/BRAIN.md and follow it."
+  if [ -s "$PDIR/integration-context.md" ]; then
+    echo "Linked work context: $PDIR/integration-context.md — read it before this phase; task requirements and external status belong to the linked source."
+  fi
 }
 
 # ---------- commands ---------------------------------------------------------
@@ -1761,6 +1777,7 @@ cmd_status() {
 
 cmd_run() {
   load_project
+  project_integrations_check || return 2
   sweep_stale "$PROJECT" "$PDIR"
   # How this run ended, for `brain auto` to act on: "" ran normally, "gate" stopped at a
   # human phase, "timeout" was killed by the ceiling. A global because the return code is
