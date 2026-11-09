@@ -272,10 +272,27 @@ role_cfg() { # role -> "engine model effort"
   echo "$line"
 }
 
-project_name() { slug "$(basename "$PWD")"; }
+# The project a command acts on. BRAIN_PROJECT names it, and every run the Studio starts
+# does. Otherwise it is the one project whose code folder this is, and failing that the
+# folder's own name (a project not made yet says so in load_project). Several projects may
+# share a code folder — a feature and a fix on one app — and then only the name decides.
+project_name() {
+  [ -n "${BRAIN_PROJECT:-}" ] && { echo "$BRAIN_PROJECT"; return 0; }
+  local here=() f p
+  for f in "$MEM"/projects/*/project.env; do
+    [ -f "$f" ] || continue
+    p="$(awk -F= '$1 == "PROJECT_DIR" { print $2 }' "$f" | tr -d '"')"
+    [ "${p/#\~/$HOME}" = "$PWD" ] && here+=("$(basename "$(dirname "$f")")")
+  done
+  case ${#here[@]} in
+    0) slug "$(basename "$PWD")" ;;
+    1) echo "${here[0]}" ;;
+    *) echo "✗ ${#here[@]} projects work in $PWD: ${here[*]}. Say which: BRAIN_PROJECT=<name> brain …" >&2; return 1 ;;
+  esac
+}
 
 load_project() {
-  PROJECT="$(project_name)"
+  PROJECT="$(project_name)" || exit 1
   PDIR="$MEM/projects/$PROJECT"
   [ -f "$PDIR/project.env" ] || die "no brain project for '$PROJECT'. Create one with: brain new <playbook> $PROJECT --dir $PWD"
   # shellcheck disable=SC1091
@@ -1536,7 +1553,8 @@ cmd_new() {
   if [ -z "$client" ] && clients_on && interactive && grep -q client-profiler "$(playbook_dir "$playbook")/phases" 2>/dev/null; then
     client="$(slug "$(ask 'client slug (enter to skip)')")"
   fi
-  local pname; pname="$(slug "$(basename "$dir")")"
+  # The project is the name given; its code folder may be shared with other projects.
+  local pname; pname="$(slug "$name")"
   local pdir="$MEM/projects/$pname"
   [ -e "$pdir/project.env" ] && die "project '$pname' already exists in memory"
 
@@ -1557,7 +1575,7 @@ cmd_new() {
   # No `git init` here: the repo goes where the code is. A template's clone is that
   # already; otherwise the phase that writes the code makes it — redesign-website keeps
   # crawl/, brandkit/ and design/ beside its site, and only the site folder is a repo.
-  mkdir -p "$dir"
+  mkdir -p "$dir"; dir="$(cd "$dir" && pwd)"
 
   mkdir -p "$pdir/phases" "$pdir/qa" "$pdir/sources"
   {
@@ -1597,9 +1615,10 @@ cmd_new() {
   echo "  brief:  $pdir/brief.md"
   if [ -n "$run_now" ]; then
     # From $dir, so the phase's sandbox mounts the project the way every later run does.
-    cd "$dir"; cmd_run
+    cd "$dir"; BRAIN_PROJECT="$pname" cmd_run
   else
-    echo "  then:   cd $dir && brain run   ('$first_phase' reads the brief)"
+    local run="brain run"; (cd "$dir" && [ "$(project_name 2>/dev/null)" = "$pname" ]) || run="BRAIN_PROJECT=$pname brain run"
+    echo "  then:   cd $dir && $run   ('$first_phase' reads the brief)"
   fi
 }
 
@@ -1835,6 +1854,12 @@ $(phase_section "$phase")"
       || die "could not record blocked attempt at $run_dir"
     cat "$run_dir/preflight.log"
     info "'$phase' is blocked by missing contract inputs. Record: $run_dir"
+    return 2
+  fi
+  # One working tree, one run: another project on this code folder would switch its
+  # branch under this one. Started from the Studio, the request waits (watch_runs).
+  if shared_busy "$PROJECT" "${PROJECT_DIR:-$PWD}"; then
+    info "another project is running a phase in ${PROJECT_DIR:-$PWD} — one run per code folder at a time; run '$phase' once it is done"
     return 2
   fi
   # Explicitly rerunning a completed phase must not leave the previous approval
@@ -2284,10 +2309,25 @@ watch_runs() {
     if [ "$MAX_PARALLEL" -gt 0 ] && [ "$(running_projects)" -ge "$MAX_PARALLEL" ]; then
       QUEUED=$((QUEUED + 1)); continue
     fi
+    # One working tree, one run: two projects on the same code folder (a feature and a fix
+    # on one app) would switch branches under each other. The request waits its turn.
+    if shared_busy "$name" "$pdir"; then QUEUED=$((QUEUED + 1)); continue; fi
     rm -f "$req"; : > "$dir/.launching"
     info "$name -> brain $want   ($pdir)"
-    terminal "$pdir" "brain $want"
+    terminal "$pdir" "BRAIN_PROJECT=$name brain $want"
   done
+}
+
+shared_busy() { # project code-dir -> true when another project on that folder has a phase running
+  local f o
+  for f in "$MEM"/projects/*/project.env; do
+    [ -f "$f" ] || continue
+    o="$(basename "$(dirname "$f")")"; [ "$o" = "$1" ] && continue
+    [ "$(awk -F= '$1 == "PROJECT_DIR" { print $2 }' "$f" | tr -d '"')" = "$2" ] || continue
+    [ ! -f "$(dirname "$f")/.launching" ] || return 0
+    compgen -G "$(dirname "$f")/phases/*.running" >/dev/null && return 0
+  done
+  return 1
 }
 
 # `brain watch install` makes it a login item, which is what lets someone who never opens

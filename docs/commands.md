@@ -86,3 +86,9 @@ moves it on its own. A sandbox is built from the image once and never revisited,
 the tag has moved under an existing one `brain run` says so and tells you how to rebuild —
 otherwise a tool added to `templates/bin/` exists in the repo, in no image, and in no
 sandbox, and every call to it fails silently.
+
+
+Projects may share a code folder: `brain new frappe-feature invoice-export --dir /path/to/app`
+keeps `invoice-export` as the project name. When more than one project uses the current
+folder, choose with `BRAIN_PROJECT=invoice-export brain run`. Studio launches name the
+project automatically and wait while another project has a phase running in that folder.

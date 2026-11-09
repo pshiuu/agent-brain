@@ -922,7 +922,6 @@ export function projects () {
       title: (titled || '').trim().replace(/^(['"])(.*)\1$/, '$2') || answer || null, keyword: answer || null,
       template: env.TEMPLATE || null, hostDir,
       visible: seen, has, tabs,
-      dirMatches: !hostDir || basename(hostDir).toLowerCase().replace(/[^a-z0-9-]/g, '-') === name,
       phases, next: next || null, sources: sources(name),
       blocked: next && (next.role === 'human' || ['awaiting-fix', 'stuck'].includes(next.state)) ? next : null,
       // A run the cockpit asked for that `brain watch` has not started yet: queued at the
@@ -1994,8 +1993,6 @@ export function lint () {
     if (!p.playbook) add('error', at, 'no PLAYBOOK= — load_project crashes under set -u')
     else if (!pbs.some(x => x.name === p.playbook)) add('error', at, `PLAYBOOK='${p.playbook}' has no playbook directory`)
     if (p.hostDir && !SAFE_ENV.test(p.hostDir)) add('error', at, `PROJECT_DIR is sourced as bash on the host; '${p.hostDir}' can execute`)
-    if (!p.dirMatches) add('error', at,
-      `PROJECT_DIR basename does not match the memory folder '${p.name}'. brain derives the project from the directory name, so brain status inside ${p.hostDir} will say there is no brain project.`)
   }
   return out
 }
