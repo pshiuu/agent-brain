@@ -20,3 +20,6 @@ system/apps.lock
 system/skills.lock
 system/config/
 system/brain.local.conf
+
+# Host-only credential handoff, never mounted into agent sandboxes.
+/.credentials-inbox/

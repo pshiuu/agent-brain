@@ -69,13 +69,16 @@ mcp      dataforseo https://mcp.dataforseo.com/http           an MCP server its 
 secret   dataforseo basic <check-url> DataForSEO API login     that server's key (basic or bearer)
 setting  serp toggle on Live Google results                    a value its skills read
 allow    api.openalex.org,doi.org                              hosts its sandboxes may reach
+host-credential erp keypair site_url ERPNext API              a key pair for its own host code (cli.sh)
 ```
 
 An app's `secret` and `setting` lines become a Settings section on its page in Admin → Apps. A key is checked at the check URL, stored by `brain watch` in sbx's secret store (the
 agent never sees it) and only then goes into new sandboxes; settings land in
 `system/config/<app>.conf`, outside the app's folder, so an update keeps them. `mcp` lines
 without a secret and `allow` lines are registered by `brain sync-sandbox`, like those in
-`system/sandbox.conf`.
+`system/sandbox.conf`. A `host-credential` is for the app's own host code, never an agent:
+the pair waits in `.credentials-inbox/` (mounted into no sandbox) until the app's
+`<name>_watch` checks it and keeps it where it keeps keys.
 
 `brain test` runs everything that says the brain works — the test suites, the lint,
 every playbook check and every installed app's check and tests — in one go.

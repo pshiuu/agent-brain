@@ -1436,7 +1436,7 @@ function appPage (name) {
   api(`/api/app-readme?name=${encodeURIComponent(a.name)}`)
     .then(r => { readme.textContent = ''; readme.append(md(r.text.replace(/^# .*\n/, ''))) })
     .catch(() => { readme.textContent = '' })
-  if (a.installed && (a.installed.config.secrets.length || a.installed.config.settings.length)) {
+  if (a.installed && (a.installed.config.secrets.length || a.installed.config.settings.length || a.installed.config.credentials?.length)) {
     box.append($('h2', 'store-section', 'Settings'), appSettingsView(a.name))
   }
   box.append($('h2', 'store-section', 'About'), readme)
@@ -1449,7 +1449,40 @@ function appPage (name) {
 function appSettingsView (name) {
   const a = S.apps.find(x => x.name === name)
   const c = a.config, box = $('div')
-  box.append($('p', 'sub', `From its app.conf. Keys go into sbx's secret store, never into a file in this folder; settings into system/config/${a.name}.conf, which its agents read.`))
+  box.append($('p', 'sub', `From its app.conf. An MCP key goes into sbx's secret store and a host key pair to the app on this Mac, never into a file in this folder; settings into system/config/${a.name}.conf, which its agents read.`))
+
+  // A key pair for the app's own host code (host-credential): checked and kept by the app on
+  // the host, never stored in this folder, never shown again once saved.
+  for (const cr of c.credentials || []) {
+    box.append($('h3', '', cr.label))
+    const state = $('div', 'note', cr.pending ? 'Waiting for the app to check it on this Mac.' : cr.message || (cr.connected ? 'Connected.' : 'Not connected.'))
+    state.setAttribute('role', 'status'); state.setAttribute('aria-live', 'polite')
+    const form = $('form', 'rows'), fields = []
+    for (const [label, id] of [['API key', 'key'], ['API secret', 'secret']]) {
+      const row = $('div', 'row'), text = $('label', '', label), input = document.createElement('input')
+      Object.assign(input, { type: 'password', autocomplete: 'new-password', required: true, id: `${name}-${cr.name}-${id}`, name: id })
+      text.htmlFor = input.id
+      row.append(text, input); form.append(row); fields.push(input)
+    }
+    const save = $('button', 'primary', cr.connected ? 'Replace' : 'Connect'); save.type = 'submit'; save.disabled = cr.pending
+    form.append(save)
+    form.onsubmit = async e => {
+      e.preventDefault(); save.disabled = true
+      try {
+        const r = await api('/api/app-credential', { method: 'POST', body: { app: name, name: cr.name, key: fields[0].value, secret: fields[1].value } })
+        for (const f of fields) f.value = ''
+        state.textContent = r.watching ? 'Sent. The app checks it on this Mac and keeps it there.' : 'Saved for the app to check. Start brain watch so it can.'
+        // The app answers within seconds while brain watch runs; wait a minute for it at most.
+        for (let i = 0; i < 60 && r.watching; i++) {
+          await new Promise(ok => setTimeout(ok, 1000))
+          const now = (await api('/api/state')).apps.find(x => x.name === name)?.config.credentials?.find(x => x.name === cr.name)
+          if (!now?.pending) { state.textContent = now?.message || 'Done. Reload to see the connection.'; save.disabled = false; return }
+        }
+      } catch (err) { state.textContent = err.message; save.disabled = false }
+    }
+    const site = c.settings.find(x => x.key === cr.setting)
+    box.append(state, form, $('p', 'sub', `${site ? `Save ${site.label} first. ` : ''}The app checks the pair and keeps it on this Mac; a saved key is never shown here or reaches an agent.`))
+  }
 
   for (const sec of c.secrets) {
     box.append($('h3', '', sec.label))

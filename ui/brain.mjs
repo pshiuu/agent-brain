@@ -201,6 +201,9 @@ export function apps () {
  *  The trailing slash matters: without it `/brainX` passes a bare prefix check. */
 export function safePath (rel, root = BRAIN) {
   const p = resolve(root, String(rel || ''))
+  // An app's host credentials on their way to its cli.sh (saveAppCredential): never read back.
+  const inbox = join(BRAIN, '.credentials-inbox')
+  if (p === inbox || p.startsWith(inbox + '/')) throw new HttpError(403, 'host credentials are not readable through the cockpit')
   if (p !== root && !p.startsWith(root + '/')) throw new HttpError(400, 'path escapes root')
   return p
 }
@@ -1699,6 +1702,13 @@ function appConfig (name, lines) {
       const status = (read(join(MEM, `.secret-${n}.status`)) || '').trim()
       return { name: n, kind, check: check === '-' ? '' : check, label: label.join(' '), status, connected: status.startsWith('connected'), pending: existsSync(join(MEM, `.secret-${n}.request`)) }
     }),
+    // What the app's host code reported for the site the setting names now, never the key.
+    credentials: field('host-credential').map(([, key, kind, setting, ...label]) => {
+      let state = {}; try { state = JSON.parse(read(join(MEM, 'apps', name, `${key}-connection.json`)) || '{}') } catch {}
+      const site = saved[setting] || field('setting').find(f => f[1] === setting)?.[3]
+      const here = state.site === site
+      return { name: key, kind, setting, label: label.join(' '), connected: here && state.connected === true, message: here ? state.message || '' : '', pending: existsSync(join(BRAIN, '.credentials-inbox', name, `${key}.request`)) }
+    }),
     settings: field('setting').map(([, key, type, def, ...label]) => {
       const options = type === 'choice' ? def.split(',') : []
       return { key, type, options, def: options[0] ?? def, label: label.join(' '), value: saved[key] ?? options[0] ?? def }
@@ -1826,6 +1836,23 @@ export function saveAppSettings ({ app, values = {} }) {
   mkdirSync(join(SYS, 'config'), { recursive: true })
   writeAtomic(join(SYS, 'config', `${app}.conf`), [`# ${app}'s settings, set in the Studio (Admin → Apps). Its agents read them at $BRAIN_SYSTEM/config/${app}.conf.`, ...out].join('\n'))
   return { ok: true }
+}
+
+/** An app's `host-credential` (app-format skill): a key pair for the app's own host code,
+ *  not an MCP key for sbx. Staged 0600 in .credentials-inbox/<app>/, outside memory/ and
+ *  system/ so no sandbox ever mounts it; the app's <name>_watch checks it, keeps it where it
+ *  keeps keys and deletes the file. Nothing here returns it. */
+export function saveAppCredential ({ app, name, key = '', secret = '' }) {
+  const dir = appDirOf(app); if (!dir) throw new HttpError(404, `no app '${app}'`)
+  const lines = appLines(dir), spec = lines.find(f => f[0] === 'host-credential' && f[1] === name && f[2] === 'keypair')
+  if (!spec || !/^[a-z0-9-]+$/.test(name)) throw new HttpError(400, `'${app}' has no host credential called '${name}'`)
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(key) || !/^[A-Za-z0-9_-]{1,200}$/.test(secret)) throw new HttpError(400, 'enter the API key and the API secret')
+  const setting = appConfig(app, lines).settings.find(s => s.key === spec[3])
+  if (!setting?.value) throw new HttpError(400, `save ${setting?.label || spec[3]} first`)
+  const root = join(BRAIN, '.credentials-inbox', app); mkdirSync(root, { recursive: true, mode: 0o700 })
+  try { writeFileSync(join(root, `${name}.request`), JSON.stringify({ site: setting.value, key, secret }) + '\n', { mode: 0o600, flag: 'wx' }) }
+  catch (e) { if (e.code === 'EEXIST') throw new HttpError(409, 'a key pair is already waiting for the app to check it'); throw e }
+  return { ok: true, watching: watching() }
 }
 
 export async function saveAppSecret ({ app, name, login = '', password = '', token = '' }) {

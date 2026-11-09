@@ -230,3 +230,17 @@ The `workspace-tasks` slot receives `{path,kind,label}` for the selected code ch
 Domain apps render contributed panels beside their own local execution history. The
 provider owns remote task identity, task routing, workflow selection and update checks;
 the domain app does not import private integration code or copy its remote task database.
+
+
+## Host-only API credentials
+
+`host-credential <name> keypair <site-setting> <label>` asks, on the app's page in Admin,
+for an API key and secret that the app's own host code (`cli.sh`) uses: unlike a `secret`,
+it is no MCP key and never reaches sbx or an agent. `<site-setting>` names the app's
+`setting` that holds the site the pair belongs to; it must be saved first.
+The cockpit stages the pair as an exclusive 0600 file,
+`$BRAIN/.credentials-inbox/<app>/<name>.request` (gitignored, mounted into no sandbox,
+refused by every cockpit read). The app's `<name>_watch` checks it, keeps it wherever it
+keeps keys (the macOS Keychain, say), deletes the file and writes only
+`{site, connected, message}` to `memory/apps/<app>/<name>-connection.json`, which Admin
+shows. The pair is never copied to project memory, settings, logs or a response.

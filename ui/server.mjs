@@ -195,6 +195,7 @@ const routes = {
     if (b.confirm !== b.name) throw new HttpError(400, 'type the draft name to confirm')
     return brain.discardDraft(b.name)
   },
+  'POST /api/app-credential': ({ b }) => brain.saveAppCredential(b),
   'POST /api/app-secret': ({ b }) => brain.saveAppSecret(b),
   'POST /api/app-settings': ({ b }) => brain.saveAppSettings(b),
   'POST /api/apps': ({ b }) => brain.requestApps(b),
