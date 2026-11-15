@@ -2381,6 +2381,25 @@ running_projects() {
   echo "$n"
 }
 
+# A one-shot sandbox (evolve, analysis, a draft) exists exactly while its command runs,
+# which drops it at the end. One that is not running was left by a command that died, or
+# by an `sbx rm` the daemon refused, and nothing else will ever remove it: left alone it
+# made every later click a no-op. So it is removed here, if sbx lets it, and the request
+# goes ahead either way: launch reuses a sandbox that exists. The grace
+# covers the seconds between this watcher opening a Terminal and its sandbox running.
+ONESHOT_AT=0
+oneshot_busy() { # ERE of sandbox names -> 0 while one of them is running or just started
+  local s st busy=1 now; now="$(date +%s)"
+  while read -r s st; do
+    [ -n "$s" ] || continue
+    if [ "$st" = running ] || [ $((now - ONESHOT_AT)) -lt 90 ]; then busy=0
+    elif sbx rm --force "$s" >/dev/null 2>&1; then info "removed $s, left behind by a run that died"
+    else info "$s was left behind by a run that died and sbx will not remove it — the next run reuses it"; fi
+  done < <(sbx ls 2>/dev/null | awk -v re="$1" 'NR > 1 && $1 ~ re { print $1, ($0 ~ / running/ ? "running" : "dead") }')
+  [ "$busy" = 0 ] || ONESHOT_AT="$now"   # the caller starts one now
+  return "$busy"
+}
+
 # One tick of the cockpit's run requests: start what fits under the cap, leave the rest
 # in place. QUEUED says how many waited, for the one line the loop prints about it.
 QUEUED=0
@@ -2555,7 +2574,7 @@ cmd_watch() {
       name="$(tr -dc 'a-z0-9-' < "$MEM/.draft-request" | head -c 40)"
       if ! [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || [ ! -s "$BRAIN/.drafts/playbook/$name/REQUEST.md" ]; then
         rm -f "$MEM/.draft-request"; info "the cockpit asked to draft '$name', which has no request — ignored"
-      elif sbx ls 2>/dev/null | awk 'NR > 1 { print $1 }' | grep -q '^playbook-draft-'; then
+      elif oneshot_busy '^playbook-draft-'; then
         :  # one author at a time; the request waits
       else
         rm -f "$MEM/.draft-request"
@@ -2586,8 +2605,8 @@ cmd_watch() {
         *) info "the cockpit asked for '$want', which is not a command — ignored"; want="" ;;
       esac
       if [ -z "$want" ]; then :
-      elif sbx ls 2>/dev/null | awk 'NR > 1 { print $1 }' | grep -qE '^(brain-self|playbook-analysis)-'; then
-        info "an evolve or playbook analysis sandbox exists — one is running, or one died (sbx rm it). Not starting another"
+      elif oneshot_busy '^(brain-self|playbook-analysis)-'; then
+        info "an evolve or playbook analysis is running — not starting another"
       else
         info "brain -> $want   ($BRAIN)"
         terminal "$BRAIN" "$want"

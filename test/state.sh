@@ -491,6 +491,20 @@ denies "and the request is dropped, since that one carries on" test -f "$MEM/pro
 echo 999999 > "$MEM/projects/a/.waiting"; echo auto > "$MEM/projects/a/.run-request"; LAUNCHED=""; watch_runs
 is "$LAUNCHED" " a" "a waiting marker left by a dead launcher does not block"
 
+section "brain watch — a one-shot sandbox a dead run left behind"
+SBXLS=$'SANDBOX AGENT STATUS\nbrain-self-claude claude stopped\nproj-claude claude stopped'; REMOVED=""
+sbx() { case "$1" in ls) printf '%s\n' "$SBXLS" ;; rm) REMOVED="$REMOVED $3" ;; esac; }
+ONESHOT_AT=0; oneshot_busy '^(brain-self|playbook-analysis)-'    # not through yes/no: a subshell would lose its state
+is "$?" 1 "a stopped one does not block"
+is "$REMOVED" " brain-self-claude" "and it is removed, a project's sandbox is not"
+REMOVED=""; oneshot_busy '^(brain-self|playbook-analysis)-'
+is "$?" 0 "inside the grace after a start it counts as busy"
+is "$REMOVED" "" "and is left alone"
+ONESHOT_AT=0; SBXLS=$'SANDBOX AGENT STATUS\nbrain-self-claude claude running'; oneshot_busy '^(brain-self|playbook-analysis)-'
+is "$?" 0 "a running one blocks"
+is "$REMOVED" "" "and is left alone"
+sbx() { return 0; }
+
 section "brain watch — projects the cockpit staged"
 cmd_new() { echo "$*" > "$T/new-args"; mkdir -p "$MEM/projects/$2/phases"; printf 'PLAYBOOK=%s\nPROJECT_DIR=%s\n' "$1" "$T/dev/$2" > "$MEM/projects/$2/project.env"; echo template > "$MEM/projects/$2/brief.md"; }
 mkdir -p "$SYS/playbooks/testbook" "$MEM/.new/fresh"
