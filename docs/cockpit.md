@@ -16,7 +16,10 @@ One local server, two front ends on the same API:
   and brief for every project. **Adjust playbook** (on a finished project: **Feedback on
   the playbook**) when a playbook's results do not come out as wished (below);
   **Improvements**, the agents' proposals in plain words, each with **Accept** and
-  **Decline**, and **Apply accepted** for `brain evolve`; and **Clients**. A project's
+  **Decline**, and **Apply accepted** for `brain evolve`; **Ideas**, a box to write a
+  thought down in a line (links welcome), each idea's note, sources and what it taught,
+  **Talk about it** (a Terminal window with `brain idea <name>`) and **Make it a project**;
+  and **Clients**. A project's
   Progress tab ends with **Archive** (out of every list, record kept, **Restore** from the
   folded Archived card under the list) and **Delete**, which asks at that moment whether
   what the project taught the wiki stays or goes with it (`brain project`). A project page is built from the files the project has, not from its

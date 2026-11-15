@@ -186,6 +186,7 @@ const routes = {
   'POST /api/client-restore': ({ b }) => brain.restoreClient(b.archived),
   // For good, so the name is typed: `client` for an active one, `archived` for one in the archive.
   'DELETE /api/client': ({ b }) => brain.deleteClient(b),
+  'POST /api/idea': ({ b }) => b.name ? brain.requestIdea(b) : brain.createIdea(b),
   'POST /api/project-end': ({ b }) => brain.requestProjectEnd(b),
   'DELETE /api/project-pending': ({ b }) => brain.discardPending(b.name),
   'POST /api/run': ({ b }) => brain.startRun(b.project, b.then),

@@ -604,6 +604,66 @@ export function requestProjectEnd ({ project, archived, action, confirm }) {
   return { requested: line, watching: watching() }
 }
 
+/* ---------- ideas ----------
+   A thought that is not a project yet (bin/brain, "ideas"): KIND=idea in project.env, the
+   one kind that is the base's own. No phases: a living note the agent keeps, the sources
+   it saved, and a conversation `brain idea <name>` resumes. The Studio writes one down
+   (memory/.new/<slug>/, like any new project) and asks for a session or a promotion with
+   `.idea-request`; brain watch (idea_watch) does both. */
+const ideaSlug = text => toSlug(String(text || '').split('\n')[0]).replace(/-+/g, '-').slice(0, 40).replace(/^-+|-+$/g, '')
+const ideaDir = name => {
+  const dir = join(MEM, 'projects', String(name || ''))
+  if (!PLAYBOOK_NAME.test(String(name || '')) || parseEnv(read(join(dir, 'project.env'))).KIND !== 'idea') throw new HttpError(404, `no idea '${name}'`)
+  return dir
+}
+export function ideas () {
+  const pages = knowledge()
+  return dirs(join(MEM, 'projects')).map(name => ({ name, env: parseEnv(read(join(MEM, 'projects', name, 'project.env'))) }))
+    .filter(x => x.env.KIND === 'idea').map(({ name, env }) => {
+      const pdir = join(MEM, 'projects', name)
+      return {
+        name, title: ((read(join(pdir, 'brief.md')) || '').match(/^#\s+(.+)$/m) || [])[1]?.trim() || null,
+        hostDir: env.PROJECT_DIR || '', created: env.CREATED || null,
+        note: read(join(pdir, 'idea.md')) || '',
+        sources: ls(join(pdir, 'sources')).filter(d => d.isFile() && !d.name.startsWith('.')).map(d => d.name).sort(),
+        // What outlives it: the wiki pages that cite its record.
+        taught: pages.filter(k => k.cites.includes(name)).map(k => ({ name: k.name, summary: k.summary })),
+        running: !!(read(join(pdir, '.idea-running')) || '').trim(),
+        opening: existsSync(join(pdir, '.idea-request')) || existsSync(join(pdir, '.launching')),
+        error: (read(join(pdir, 'idea-error.txt')) || '').trim() || null,
+        ownKnowledge: ownKnowledge(name, pages), ...endState(pdir)
+      }
+    }).sort((a, b) => String(b.created).localeCompare(String(a.created)) || a.name.localeCompare(b.name))
+}
+/** Write an idea down: its text is the whole request. `open` asks to start talking right away. */
+export function createIdea ({ text, open }) {
+  const t = String(text || '').trim(), slug = ideaSlug(t)
+  if (!PLAYBOOK_NAME.test(slug)) throw new HttpError(400, 'write the idea down first: a line is enough')
+  if (existsSync(join(MEM, 'projects', slug, 'project.env'))) throw new HttpError(409, `'${slug}' exists already — carry on there, or start this one with other words`)
+  const st = join(NEW, slug)
+  if (st !== safePath(`memory/.new/${slug}`)) throw new HttpError(400, 'bad path')
+  if (existsSync(join(st, 'request')) && !existsSync(join(st, 'error'))) throw new HttpError(409, `'${slug}' is already being written down`)
+  rmSync(st, { recursive: true, force: true })
+  mkdirSync(st, { recursive: true })
+  writeAtomic(join(st, 'text.md'), t)
+  if (open) writeAtomic(join(st, 'open.md'), 'open')
+  writeAtomic(join(st, 'request'), `idea ${slug}\n`)
+  return { queued: true, idea: slug, watching: watching() }
+}
+/** `action`: open (a session, in a Terminal on the host) or promote (to `playbook`, which ends up in a command). */
+export function requestIdea ({ name, action, playbook }) {
+  const dir = ideaDir(name)
+  if (existsSync(join(dir, '.idea-request'))) throw new HttpError(409, 'already asked for — it happens within seconds while brain watch runs')
+  if (action === 'open') writeAtomic(join(dir, '.idea-request'), 'open\n')
+  else if (action === 'promote') {
+    if (!PLAYBOOK_NAME.test(String(playbook || '')) || !existsSync(join(playbookDir(playbook), 'phases'))) throw new HttpError(400, `no playbook '${playbook}'`)
+    if ((read(join(dir, '.idea-running')) || '').trim()) throw new HttpError(409, 'the idea is open in a Terminal window — end that session first')
+    rmSync(join(dir, 'idea-error.txt'), { force: true })
+    writeAtomic(join(dir, '.idea-request'), `promote ${playbook}\n`)
+  } else throw new HttpError(400, `'${action}' is not something an idea does — open or promote`)
+  return { requested: action, watching: watching() }
+}
+
 // ---------- state ------------------------------------------------------------
 
 export function playbooks () {
@@ -2579,7 +2639,7 @@ export function knowledgeGraph () {
 
 export function state () {
   return {
-    playbooks: playbooks(), apps: apps(), store: appStore(), base: baseUpdate(), engines: engines(), usage: usage(), clientsOn: clientsOn(), roles: roles(), skills: skills(), sandbox: sandbox(), projects: projects(), archivedProjects: archivedProjects(), clients: clients(), archivedClients: archivedClients(), knowledge: knowledge(), proposals: proposals(read(join(MEM, 'proposals.md'))), examples: examples(), sources: sources(), lint: lint(), models: models(), maxFixLoops: MAX_FIX_LOOPS, hostBrain: HOST_BRAIN, hostDev: HOST_DEV, watching: watching(), evolvePending: existsSync(join(MEM, '.evolve-request')),
+    playbooks: playbooks(), apps: apps(), store: appStore(), base: baseUpdate(), engines: engines(), usage: usage(), clientsOn: clientsOn(), roles: roles(), skills: skills(), sandbox: sandbox(), projects: projects(), ideas: ideas(), archivedProjects: archivedProjects(), clients: clients(), archivedClients: archivedClients(), knowledge: knowledge(), proposals: proposals(read(join(MEM, 'proposals.md'))), examples: examples(), sources: sources(), lint: lint(), models: models(), maxFixLoops: MAX_FIX_LOOPS, hostBrain: HOST_BRAIN, hostDev: HOST_DEV, watching: watching(), evolvePending: existsSync(join(MEM, '.evolve-request')),
     maxParallel: Number(setting('BRAIN_MAX_PARALLEL', 3)) || 0,
     pending: { new: pendingProjects(), drafts: drafts(), draft: (read(join(MEM, '.draft-request')) || '').trim() || null, commit: existsSync(join(MEM, '.commit-request')) }
   }

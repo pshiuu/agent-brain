@@ -18,7 +18,7 @@ at this level or above.
   installs the result after the human sees it.
 - **The cockpit never runs a host command.** It stages a request file under `memory/`
   (`.new/<slug>/`, `<project>/.run-request`, `<project>/.end-request`, `.draft-request`, `.evolve-request`, `.update-request`,
-  `.commit-request`, `.apps-request`; an app's Studio code `<project>/.<app>-request`, `inbox/` and
+  `.commit-request`, `.apps-request`, an idea's `<project>/.idea-request`; an app's Studio code `<project>/.<app>-request`, `inbox/` and
   `<name>.staged` through `/api/app-request`) and `brain watch` acts on it, at most
   `BRAIN_MAX_PARALLEL` runs at once. A new kind of button means a new request file and a new `case` in `cmd_watch`,
   never a shell in the container. The install of a draft is the one place the cockpit
@@ -37,7 +37,8 @@ at this level or above.
 - **Roles are two halves that must agree**: a line in a `roles.conf` and `roles/<name>.md`
   in the same root (the base or one app). Never write one without the other.
 - **A KIND is an app's, not a playbook's.** A project.env with `KIND=<kind>` (an academy
-  workspace) belongs to the app whose `app.conf` says `kind <kind>`; `load_project` refuses
+  workspace) belongs to the app whose `app.conf` says `kind <kind>` — except `KIND=idea`,
+  the base's own (`brain idea`, the `idea_*` functions in bin/brain, role `idea-partner`); `load_project` refuses
   it and names that app, and the cockpit's project list skips it. The app's host side is its
   `cli.sh` (`cmd_<app>`, `<app>_watch`, `<app>_studio_new`), sourced by `app_cli` — it
   never defines a function outside those names (`brain app check`).

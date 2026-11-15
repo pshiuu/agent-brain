@@ -54,7 +54,7 @@ icon      file-text              a Phosphor icon name, for its tile in the store
 version   1.2.0                  required
 brain     >= 2                   the base version it works with; required
 requires  web                    other apps it needs installed (space-separated)
-kind      academy                a workspace kind it owns (KIND= in a project.env); needs cli.sh
+kind      academy                a workspace kind it owns (KIND= in a project.env); needs cli.sh. Not `idea`: that one is the base's
 ```
 
 What its sandboxes reach and what it needs from the human — each may repeat:
@@ -93,7 +93,7 @@ it is needed and calls, by name:
 | `cmd_<name>` | `brain <name> <verb> [args]` — required in every `cli.sh` |
 | `<name>_watch` | every `brain watch` tick (move in what the Studio staged, start a queued run) |
 | `<name>_studio_new <slug> <stage-dir>` | the Studio's New form asked for the app's `kind`; `memory/.new/<slug>/` holds what the form wrote. Non-zero leaves `log` there as the error |
-| `<name>_project_deleted <project> <project-dir> keep\|all` | a project of the app's `kind` was deleted (`brain project rm`, the Studio); its record is gone already. For what the app made outside memory — the idea app's scratch folder. `all` means the human asked for everything to go |
+| `<name>_project_deleted <project> <project-dir> keep\|all` | a project of the app's `kind` was deleted (`brain project rm`, the Studio); its record is gone already. For what the app made outside memory, like a workspace folder. `all` means the human asked for everything to go |
 
 Everything else it defines starts with `<name>_`, so nothing it sources replaces a function
 of the launcher. It may call these of the launcher's, and no others — the rest changes

@@ -723,6 +723,95 @@ function improvementsView () {
   return frame(crumbs, [], ...parts)
 }
 
+/* ---------- ideas ----------
+   A thought before it is a project: one line to write it down, then a conversation with an
+   agent that is resumed as often as you like (bin/brain, "ideas"). The page shows what the
+   agent keeps — the note, the sources, what it taught the wiki — and how an idea ends: as
+   a real project, in the archive, or deleted with the choice of what stays. */
+const ideaTitle = i => i.title || human(i.name)
+const ideaState = i => i.ending ? { key: 'queued', label: i.ending === 'archive' ? 'Being archived' : 'Being deleted', icon: 'clock' }
+  : i.running ? { key: 'work', label: 'Being talked about', icon: 'circle-notch' }
+    : i.opening ? { key: 'queued', label: 'Opening', icon: 'clock' } : { key: 'paused', label: 'Resting', icon: 'moon' }
+const ideaAsk = async (body, said) => {
+  try { const r = await api('/api/idea', { method: 'POST', body }); toast(r.watching ? said : 'Saved. It happens as soon as the helper runs.'); await refresh(); render() }
+  catch (e) { toast(e.message) }
+}
+function newIdeaCard () {
+  const text = keep($('textarea')); text.rows = 3; text.setAttribute('aria-label', 'The idea')
+  text.placeholder = 'The idea, in a line or a few. Links welcome: the agent reads them first.'
+  const bar = $('div', 'bar'), talk = btn('primary', 'chat-circle-dots', 'Save and start talking'), save = btn('', 'floppy-disk', 'Just save')
+  const go = open => async () => {
+    const t = text.value.trim()
+    if (!t) return toast('Write the idea down first.')
+    talk.disabled = save.disabled = true
+    try {
+      const r = await api('/api/idea', { method: 'POST', body: { text: t, open } })
+      delete text.dataset.keep; text.value = ''
+      toast(!open ? 'Written down.' : r.watching ? 'Written down. A Terminal window opens on the Mac to talk about it.' : 'Written down. The talk starts as soon as the helper runs.')
+      await refresh(); render()
+    } catch (e) { toast(e.message); talk.disabled = save.disabled = false }
+  }
+  talk.onclick = go(true); save.onclick = go(false)
+  bar.append(talk, save)
+  return card('A new idea', 'No brief and no plan needed. The agent asks, looks things up and keeps the note.', null, pad(text, bar))
+}
+function ideasView () {
+  const rows = S.ideas.map(i => {
+    const r = $('tr'), go = `#/ideas/${encodeURIComponent(i.name)}`
+    rowLink(r, go)
+    r.append(td('', link(go, 't', ideaTitle(i))), td('', tagOf(ideaState(i))), td('dim hide-sm', ago(i.created)))
+    return r
+  })
+  for (const n of S.pending.new.filter(n => n.playbook === 'idea')) {
+    const r = $('tr'), name = td('', $('span', 't', human(n.slug))); r.style.cursor = 'default'
+    if (n.error) name.append($('span', 'k', n.error))
+    r.append(name, td('', tagOf({ key: n.error ? 'stuck' : 'queued', label: n.error ? 'Could not be saved' : 'Being written down', icon: n.error ? 'warning-circle' : 'clock' })), td('dim hide-sm', ''))
+    rows.unshift(r)
+  }
+  return frame([['Ideas', '', 'sparkle']], [],
+    head('Ideas', 'Things worth thinking about before they are projects. Talk one through as often as you like; what the agent learns stays for the next one.'),
+    watchingNote(), newIdeaCard(),
+    rows.length ? card('Your ideas', `${S.ideas.length} in all.`, null, table([['Idea', ''], ['Status', ''], ['Written down', 'hide-sm']], rows, ''))
+      : card('Your ideas', '', null, empty('sparkle', 'Nothing written down yet', 'Start with one line above. It can be half a thought.')),
+    archivedCard(a => a.kind === 'idea'))
+}
+function ideaView (name) {
+  const i = S.ideas.find(x => x.name === name)
+  if (!i) {
+    const moved = S.projects.find(x => x.name === name)
+    return frame([['Ideas', '#/ideas', 'sparkle'], [human(name)]], [], moved
+      ? card('Now a project', '', null, empty('rocket-launch', 'This idea became a project', 'A playbook runs it now, with what was found before in its sources.', link(`#/a/${encodeURIComponent(name)}`, 'btn primary', 'Open the project')))
+      : card('Not found', '', null, empty('magnifying-glass', 'No such idea', `There is no idea called ${name}. It may have been archived or deleted.`, link('#/ideas', 'btn', 'All ideas'))))
+  }
+  const talk = btn('primary', 'chat-circle-dots', i.running ? 'Open in a Terminal window' : 'Talk about it')
+  talk.disabled = !!(i.running || i.opening || i.ending)
+  talk.onclick = () => { talk.disabled = true; ideaAsk({ name: i.name, action: 'open' }, 'A Terminal window opens on the Mac.') }
+  const parts = [head(ideaTitle(i), i.hostDir ? `Scratch folder: ${i.hostDir}` : '', tagOf(ideaState(i)), talk), watchingNote()]
+  if (i.error) parts.push(note('err', 'warning-circle', i.error))
+  const body = i.note.replace(/^#\s+.*\n+/, '').trim()
+  parts.push(card('The note', 'Kept by the agent: rewritten each session, so it is where the idea stands now.', null,
+    pad(body ? md(body) : $('p', 'dim', 'Nothing yet. The first session writes it.'))))
+  if (i.sources.length) {
+    const ul = $('ul'); ul.append(...i.sources.map(f => $('li', '', f)))
+    parts.push(card('Sources', 'What it looked up and saved, so a claim can be checked after the site is gone.', null, pad(ul)))
+  }
+  if (i.taught.length) {
+    const ul = $('ul'); ul.append(...i.taught.map(k => { const li = $('li'); li.append($('strong', '', human(k.name)), document.createTextNode(k.summary ? ` — ${k.summary}` : '')); return li }))
+    parts.push(card('What it taught', 'Pages in the brain\'s knowledge that rest on this idea. The next idea or project on the same thing reads them.', null, pad(ul)))
+  }
+  // Only when it has earned one: most ideas never become a project.
+  const pick = $('select', 'chip'), promote = btn('', 'rocket-launch', 'Make it a project'), bar = $('div', 'bar')
+  pick.setAttribute('aria-label', 'Playbook')
+  for (const pb of S.playbooks) pick.append(Object.assign(document.createElement('option'), { value: pb.name, textContent: `${typeOf(pb.name)} · ${pb.area}` }))
+  promote.disabled = !!(i.running || i.opening || i.ending)
+  promote.onclick = async () => { promote.disabled = true; await ideaAsk({ name: i.name, action: 'promote', playbook: pick.value }, 'It is a project in a moment.') }
+  bar.append(pick, promote)
+  parts.push(card('Make it a project', 'When it needs a brief, reviews and a result someone signs off. It stays the same project: the note and the sources go along, a playbook runs it from here.', null,
+    pad(S.playbooks.length ? bar : $('p', 'dim', 'No playbook is installed yet. Admin has them, under Apps.'))),
+  endCard(i, '#/ideas', 'Deleting everything also removes its scratch folder, when the brain made it.'))
+  return frame([['Ideas', '#/ideas', 'sparkle'], [ideaTitle(i)]], [], ...parts)
+}
+
 /* ---------- adjusting a playbook ---------- */
 /* When a playbook's results do not come out as wished, say what should be different. The
    AI rewrites a copy of the playbook; you see what it changed and apply it, or not. */
@@ -810,7 +899,7 @@ function changes (d, p) {
    pages. Its code runs in this page with everything the Studio may do, which is why
    installing it asks for trust. It reads and stages through /api/app-read and
    /api/app-request, scoped on the server to its own projects and folder. */
-const BASE_ROUTES = new Set(['', 'articles', 'area', 'new', 'a', 'adjust', 'improve'])
+const BASE_ROUTES = new Set(['', 'articles', 'area', 'new', 'a', 'adjust', 'improve', 'ideas'])
 const appRoutes = {}, appNavs = [], appExtensions = createExtensions()
 function kit (app) {
   const post = (path, body) => api(path, { method: 'POST', body: { app: app.name, ...body } })
@@ -845,7 +934,7 @@ async function loadApps () {
   }
 }
 /** A staged project of an app's kind (an academy workspace) is the app's to show, not a project's. */
-const ofKind = n => S.apps.some(a => a.kind && a.kind === n.playbook)
+const ofKind = n => n.playbook === 'idea' || S.apps.some(a => a.kind && a.kind === n.playbook)
 
 /* ---------- routing and live updates ---------- */
 function renderNav (active) {
@@ -862,6 +951,7 @@ function renderNav (active) {
   nav.append(group('', '',
     item('#/', 'Overview', 'house', 'home', you, 'you'),
     item('#/articles', 'All projects', 'files', 'articles', S.projects.length),
+    item('#/ideas', 'Ideas', 'sparkle', 'ideas', S.ideas.length),
     item('#/improve', 'Improvements', 'lightbulb', 'improve', S.proposals.Open.length, 'you')))
   nav.append(group('Areas', 'areas', ...areas().map(a => item(areaHref(a), a, 'folder', `area:${toSlug(a)}`, waits(a), 'you'))))
   for (const g of appNavs) {
@@ -875,7 +965,7 @@ function render (opts = {}) {
   // A project, its adjustment and a New form opened from an area light up that area.
   const inArea = key === 'a' ? S.projects.find(p => p.name === slug)?.playbook && `area:${toSlug(areaOf(S.projects.find(p => p.name === slug).playbook))}`
     : key === 'adjust' ? `area:${toSlug(areaOf(slug))}` : key === 'new' && areas().some(a => toSlug(a) === slug) ? `area:${slug}` : ''
-  const active = inArea || appRoutes[key]?.active(slug) || { '': 'home', articles: 'articles', area: `area:${slug}`, new: 'new', improve: 'improve' }[key] || 'home'
+  const active = inArea || appRoutes[key]?.active(slug) || { '': 'home', articles: 'articles', area: `area:${slug}`, new: 'new', improve: 'improve', ideas: 'ideas' }[key] || 'home'
   renderNav(active)
   let el
   try {
@@ -885,6 +975,7 @@ function render (opts = {}) {
         : key === 'adjust' ? adjustView(slug, decodeURIComponent(sub))
         : key === 'articles' ? projectsView()
         : key === 'improve' ? improvementsView()
+        : key === 'ideas' ? (slug ? ideaView(slug) : ideasView())
         : key === 'area' ? projectsView(slug)
           : overview()
   } catch (e) { el = frame([['Studio']], [], note('err', 'warning-circle', e.message)) }

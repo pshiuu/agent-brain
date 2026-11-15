@@ -70,6 +70,14 @@
 #   brain reject <phase> "feedback"     send a phase with a fix-role back with feedback
 #   brain reopen <phase> "feedback"     send the playbook back to <phase>: it and every
 #                                       later phase run again (launch-gate's way back)
+#   brain idea "<the idea in a line>"   a thought that is not a project yet: write it down
+#                                       and start talking about it with an agent that
+#                                       reads your links, researches, keeps a living note
+#                                       and files what it learns. No playbook, no gates
+#   brain idea <name> ["what you bring"] [--fresh]
+#                                       carry on where the last session stopped
+#   brain idea                          the ideas you have (new, open, promote, archive, rm:
+#                                       docs/commands.md)
 #   brain project archive <name>        a project out of every list: its record moves to
 #                                       memory/projects/.archive/, its sandboxes go;
 #                                       `restore <name>` brings it back, `list` shows them
@@ -306,6 +314,7 @@ load_project() {
   # shellcheck disable=SC1091
   INTEGRATIONS=""
   source "$PDIR/project.env"
+  if [ "${KIND:-}" = idea ]; then die "'$PROJECT' is an idea, not a playbook project — use brain idea $PROJECT (or brain idea promote $PROJECT <playbook>)"; fi
   if [ -n "${KIND:-}" ]; then
     local app; app="$(kind_app "$KIND")" || die "'$PROJECT' is KIND=$KIND, which no installed app owns — install that app (brain app install $KIND)"
     die "'$PROJECT' belongs to the $app app (KIND=$KIND), not to a playbook — use brain $app"
@@ -2346,8 +2355,14 @@ watch_new() {
     slug="$(basename "$st")"
     read -r pb slug client _ < "$st/request" || true
     if ! [[ "$pb" =~ ^[a-z0-9][a-z0-9-]*$ && "$slug" =~ ^[a-z0-9][a-z0-9-]*$ && "${client:-x}" =~ ^[a-z0-9][a-z0-9-]*$ ]] \
-      || [ "$slug" != "$(basename "$st")" ] || { ! kind_app "$pb" >/dev/null && [ ! -d "$(playbook_dir "$pb")" ]; }; then
+      || [ "$slug" != "$(basename "$st")" ] || { [ "$pb" != idea ] && ! kind_app "$pb" >/dev/null && [ ! -d "$(playbook_dir "$pb")" ]; }; then
       echo "not a valid request: $(head -1 "$st/request")" > "$st/error"; continue
+    fi
+    # An idea is the base's own kind.
+    if [ "$pb" = idea ]; then
+      if idea_studio_new "$slug" "$st"; then rm -rf "$st"
+      else tail -3 "$st/log" > "$st/error" 2>/dev/null; [ -s "$st/error" ] || echo "could not write down $slug" > "$st/error"; info "could not create $slug: $(tail -1 "$st/error")"; fi
+      continue
     fi
     # A kind an app owns (an academy workspace): that app makes it, from what the form staged.
     local app
@@ -2476,9 +2491,10 @@ project_delete() { # name keep|all -> the record gone; with all, the knowledge o
   fi
   rm -rf "$d" || { echo "could not delete '$1'"; return 1; }
   project_sandboxes_drop "$name" >&2
-  # The app a project of a kind belongs to may have made things of its own for it (the
-  # idea app's scratch folder): told last, when the record is gone for certain.
-  if [ -n "$kind" ] && app="$(kind_app "$kind")" && app_cli "$app" && declare -F "${app}_project_deleted" >/dev/null; then
+  # Whoever owns the project's kind may have made things of its own for it (an idea's
+  # scratch folder): told last, when the record is gone for certain.
+  if [ "$kind" = idea ]; then idea_project_deleted "$name" "$dir" "${2:-keep}" >&2 || true
+  elif [ -n "$kind" ] && app="$(kind_app "$kind")" && app_cli "$app" && declare -F "${app}_project_deleted" >/dev/null; then
     "${app}_project_deleted" "$name" "$dir" "${2:-keep}" >&2 || true
   fi
   [ -d "$dir" ] || dir=""
@@ -2503,6 +2519,248 @@ cmd_project() {
       out="$(project_delete "$name" "$mode")" || die "$out"; info "$out" ;;
     *) die "usage: brain project archive <name> | restore <name> | rm <name> [--knowledge] [--yes] | list" ;;
   esac
+}
+
+# ---------- ideas -------------------------------------------------------------
+# The third way of working, next to playbooks and an app's own kind: a thought that is
+# not a project yet. No phases and no gates — one role (idea-partner), one conversation
+# that is resumed, and three files the agent keeps true in memory/projects/<name>/
+# (brief.md, idea.md, sources/). Its project.env says KIND=idea, the one kind that is the
+# base's own. What it learns about a tool or a device goes into memory/knowledge/ under
+# the words of the brief's ## Stack, which is how the next idea on the same thing — or a
+# real project — starts from it. An idea ends like any project (brain project, the
+# Studio's Archive and Delete), or becomes one: idea_promote hands it to a playbook.
+idea_is() { # name -> true when it is an idea
+  [[ "${1:-}" =~ ^[a-z0-9][a-z0-9-]*$ ]] && [ "$(awk -F= '$1 == "KIND" { print $2 }' "$MEM/projects/$1/project.env" 2>/dev/null)" = idea ]
+}
+idea_load() { # name -> PROJECT, PDIR, PROJECT_DIR
+  [ -n "${1:-}" ] || die "which idea? brain idea lists them"
+  idea_is "$1" || die "no idea '$1' — brain idea lists them, brain idea \"<text>\" starts one"
+  PROJECT="$1"; PDIR="$MEM/projects/$PROJECT"
+  PROJECT_DIR="$(awk -F= '$1 == "PROJECT_DIR" { sub(/^[^=]*=/, ""); print }' "$PDIR/project.env" | tr -d '"')"
+  CLIENT=""; PLAYBOOK=""
+}
+idea_title() { sed -n '1s/^# *//p' "$1/brief.md" 2>/dev/null; } # pdir -> the idea's first line
+
+idea_list() {
+  local d n=0
+  for d in "$MEM"/projects/*/; do
+    idea_is "$(basename "$d")" || continue
+    printf '  %-28s %s\n' "$(basename "$d")" "$(idea_title "$d")"; n=$((n + 1))
+  done
+  [ "$n" -gt 0 ] || echo "  no ideas yet — brain idea \"<the idea in a line>\""
+}
+
+IDEA_NAME=""
+idea_new() { # "<text>" [--name N] [--dir PATH] -> IDEA_NAME
+  local text="" name="" dir=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      --dir)  dir="$2"; shift 2 ;;
+      -*) die "unknown option $1" ;;
+      *) text="${text:+$text }$1"; shift ;;
+    esac
+  done
+  if [ -z "$text" ]; then
+    interactive || die "usage: brain idea new \"<the idea in a line>\" [--name N]"
+    text="$(ask 'the idea, in a line')"
+    [ -n "$text" ] || die "an idea needs at least a line"
+  fi
+  # The name is the idea's first words: enough to find it again, short enough to type.
+  [ -n "$name" ] || name="$(printf '%s' "$text" | head -1)"
+  name="$(slug "$name" | tr -s '-' | cut -c1-40 | sed 's/^-*//; s/-*$//')"
+  [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "'$text' does not make a usable name — give one: --name <name>"
+  local pdir="$MEM/projects/$name"
+  [ -e "$pdir/project.env" ] && die "'$name' exists already — carry on with: brain idea $name   (or give this one another name: --name)"
+  dir="${dir:-$DEV/ideas/$name}"
+  mkdir -p "$dir" "$pdir/sources"; dir="$(cd "$dir" && pwd)"
+  # Says the scratch folder is this idea's, so deleting the idea may take it along. A
+  # folder that was there before (--dir on a repo of yours) never gets one.
+  [ -n "$(ls -A "$dir" 2>/dev/null)" ] || echo "$name" > "$dir/.brain-idea"
+  printf 'KIND=idea\nPROJECT_DIR=%s\nCREATED=%s\n' "$dir" "$(date +%F)" > "$pdir/project.env"
+  {
+    printf '# %s\n\n## Idea\n%s\n\n## Stack\n' "$(printf '%s' "$text" | head -1)" "$text"
+    printf '<!-- The tools, hardware and languages this idea is about, one word each (stm32, midi,\n     payload). The agent keeps it current: these words are the tags of the knowledge this\n     idea reads and writes. -->\n- \n'
+  } > "$pdir/brief.md"
+  printf '# %s\n\n## Where it stands\nNew: nothing looked into yet.\n\n## What we know\n\n## Options\n\n## Open questions\n\n## Next\n' "$(printf '%s' "$text" | head -1)" > "$pdir/idea.md"
+  : > "$pdir/decisions.md"
+  IDEA_NAME="$name"
+  info "idea '$name' written down"
+  echo "  note:    $pdir/idea.md"
+  echo "  scratch: $dir"
+  echo "  talk:    brain idea $name"
+}
+
+idea_open() { # name [words...] [--engine E] [--model M] [--effort L] [--fresh]
+  local engine="" model="" effort="" what="" resume=1 name="${1:-}"; [ $# -gt 0 ] && shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --engine) engine="$2"; shift 2 ;;
+      --model)  model="$2";  shift 2 ;;
+      --effort) effort="$2"; shift 2 ;;
+      --fresh)  resume=""; shift ;;
+      -*) die "unknown option $1" ;;
+      *) what="${what:+$what }$1"; shift ;;
+    esac
+  done
+  idea_load "$name"
+  rm -f "$PDIR/.launching"
+  local pid; pid="$(awk '{ print $1; exit }' "$PDIR/.idea-running" 2>/dev/null || true)"
+  [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null || die "'$PROJECT' is open in another window"
+  local r_engine r_model r_effort
+  read -r r_engine r_model r_effort <<< "$(role_cfg idea-partner)"
+  engine="${engine:-$r_engine}"; model="${model:-$r_model}"; effort="${effort:-$r_effort}"
+  mkdir -p "$PROJECT_DIR"; cd "$PROJECT_DIR"
+
+  # The Studio reads this to say the idea is being talked about; brain watch, to start
+  # nothing else here.
+  printf '%s open\n' "$$" > "$PDIR/.idea-running"
+  trap 'rm -f "$PDIR/.idea-running"' EXIT INT TERM
+
+  local prompt="You are working inside the agent brain system, on an idea — not a playbook run.
+Brain instructions (read-only): $SYS
+Brain memory (read-write):      $MEM
+Idea: $PROJECT   Idea memory: $PDIR   Scratch folder (the working directory): $PROJECT_DIR
+Knowledge scope: $(knowledge_scope) — in index.md, read only the Knowledge sections tagged with one of these.
+First read $SYS/BRAIN.md and follow it, except where it speaks of playbooks, phases,
+reviews and handoff files: an idea has none. Your role says what it has instead.
+${what:+
+What the human brings to this session: $what
+}
+Start as your role says: where the idea stands, what you would do next, then ask."
+  local rc=0
+  launch "$engine" "$model" "$effort" "$prompt" idea-partner "$resume" || rc=$?
+  rm -f "$PDIR/.idea-running"; trap - EXIT INT TERM
+  # What the session wrote into the wiki is this brain's now, whatever becomes of the idea.
+  commit_memory "idea $PROJECT"
+  [ "$rc" -eq 0 ] || info "the session ended with $rc — brain idea $PROJECT carries on where it stopped"
+  echo "  note: $PDIR/idea.md"
+}
+
+# An idea that has earned a real project: the same folder in memory and the same scratch
+# folder, now run by a playbook. What was found stays where every phase reads it.
+idea_promote() { # name playbook
+  local pb="${2:-}" tpl stack ints
+  idea_load "${1:-}"
+  [[ "$pb" =~ ^[a-z0-9][a-z0-9-]*$ ]] && [ -f "$(playbook_dir "$pb")/phases" ] || die "usage: brain idea promote <name> <playbook> — brain playbooks lists them"
+  [ ! -f "$PDIR/.idea-running" ] || die "'$PROJECT' is open — end the session first"
+  tpl="$(playbook_dir "$pb")/brief.md"; [ -f "$tpl" ] || tpl="$SYS/brief-template.md"
+  stack="$(brief_body '## Stack' "$PDIR/brief.md" | grep -v '^[[:space:]]*<!--' | grep -v '^[[:space:]]*-->' | grep -v '^     ' | grep -v '^-[[:space:]]*$' || true)"
+  mkdir -p "$PDIR/phases" "$PDIR/qa" "$PDIR/sources"
+  mv "$PDIR/brief.md" "$PDIR/sources/idea-brief.md"; mv "$PDIR/idea.md" "$PDIR/sources/idea.md"
+  # The idea's own words go under the brief's Goal and its stack under Stack, when the
+  # playbook's brief has those headings; the rest of the brief is the human's to fill.
+  # Through the environment: awk -v refuses a value with a newline in it.
+  IDEA_GOAL="$(brief_body '## Idea' "$PDIR/sources/idea-brief.md")" IDEA_STACK="$stack" awk '
+    { print }
+    $0 == "## Goal" && ENVIRON["IDEA_GOAL"] != "" { print ENVIRON["IDEA_GOAL"]; print "" }
+    $0 == "## Stack" && ENVIRON["IDEA_STACK"] != "" { print ENVIRON["IDEA_STACK"] }
+  ' "$tpl" > "$PDIR/brief.md"
+  ints="$(awk -F= '$1 == "INTEGRATIONS" { gsub(/["'"'"']/, "", $2); print $2 }' "$(playbook_dir "$pb")/playbook.env" 2>/dev/null || true)"
+  {
+    printf 'PLAYBOOK=%s\nPROJECT_DIR=%s\nCREATED=%s\n' "$pb" "$PROJECT_DIR" "$(awk -F= '$1 == "CREATED" { print $2 }' "$PDIR/project.env")"
+    [[ "$ints" =~ ^[a-z0-9][a-z0-9-]*$ ]] && printf 'INTEGRATIONS=%s\n' "$ints"
+  } > "$PDIR/project.env.new" || true
+  mv "$PDIR/project.env.new" "$PDIR/project.env"
+  printf '%s — this project grew out of an idea — what was found before it started is in sources/idea.md (the note) and sources/idea-brief.md (how it began); read both before the brief\n' "$(date +%F)" >> "$PDIR/decisions.md"
+  rm -f "$PROJECT_DIR/.brain-idea"
+  info "'$PROJECT' is now a $pb project"
+  echo "  brief: $PDIR/brief.md   (fill in what the playbook asks for)"
+  echo "  then:  cd $PROJECT_DIR && BRAIN_PROJECT=$PROJECT brain run"
+}
+
+idea_rm() { # name [--keep|--all]
+  local name="${1:-}" mode="" pages out; [ $# -gt 0 ] && shift
+  case "${1:-}" in --keep) mode=keep ;; --all) mode=all ;; '') ;; *) die "unknown option $1" ;; esac
+  idea_is "$name" || die "no idea '$name'"
+  if [ -z "$mode" ]; then
+    interactive || die "say what goes: --keep (what it taught stays in the wiki) or --all"
+    pages="$(project_pages "$name" | paste -sd' ' - || true)"
+    echo "  Deleting '$name' is for good. What it taught the wiki: ${pages:-nothing only it backs}"
+    case "$(ask 'k = delete the idea, keep what it taught · e = delete everything, its scratch folder too · enter = stop')" in
+      k|K) mode=keep ;; e|E) mode=all ;; *) die "stopped — nothing changed" ;;
+    esac
+  fi
+  out="$(project_delete "$name" "$mode")" || die "$out"; info "$out"
+}
+
+cmd_idea() {
+  local verb="${1:-list}" out; [ $# -gt 0 ] && shift
+  case "$verb" in
+    list)    idea_list ;;
+    new)     idea_new "$@" ;;
+    open)    idea_open "$@" ;;
+    promote) idea_promote "$@" ;;
+    archive) idea_is "${1:-}" || die "no idea '${1:-}'"; out="$(project_archive "$1")" || die "$out"; info "$out" ;;
+    rm)      idea_rm "$@" ;;
+    -*)      die "usage: brain idea [\"<text>\" | <name> | new | open | promote | archive | rm] — run brain with no arguments for help" ;;
+    *) if idea_is "$verb"; then idea_open "$verb" "$@"
+       else
+         # Anything that is not an idea's name is a new idea, in its own words. One bare
+         # word is more likely a name typed wrong than an idea.
+         case "$verb $*" in *' '?*) ;; *) die "no idea '$verb' — brain idea lists them. A new one: brain idea new \"$verb\"" ;; esac
+         idea_new "$verb" "$@"
+         if interactive; then idea_open "$IDEA_NAME"; fi
+       fi ;;
+  esac
+}
+
+# One tick for the ideas: what their pages in the Studio asked for. `open` gets a Terminal
+# window like every run; `promote <playbook>` needs none.
+idea_watch() {
+  local dir name pdir pid verb arg
+  for dir in "$MEM"/projects/*/; do
+    name="$(basename "$dir")"; dir="${dir%/}"
+    idea_is "$name" || continue
+    # A Terminal window that never got as far as the session: the page would say Opening for good.
+    [ ! -f "$dir/.launching" ] || [ -z "$(find "$dir/.launching" -mmin +1 2>/dev/null)" ] || rm -f "$dir/.launching"
+    [ -f "$dir/.idea-request" ] || continue
+    read -r verb arg < "$dir/.idea-request" || true
+    case "$verb" in
+      promote)
+        rm -f "$dir/.idea-request" "$dir/idea-error.txt"
+        ( idea_promote "$name" "$arg" ) > "$dir/.idea-log" 2>&1 || tail -1 "$dir/.idea-log" > "$dir/idea-error.txt"
+        info "$name: $(tail -1 "$dir/.idea-log")"; rm -f "$dir/.idea-log" ;;
+      open)
+        if [ -f "$dir/.idea-running" ]; then
+          pid="$(awk '{ print $1; exit }' "$dir/.idea-running")"
+          if kill -0 "$pid" 2>/dev/null; then rm -f "$dir/.idea-request"; continue; fi   # it is open already
+          rm -f "$dir/.idea-running"
+        fi
+        [ -f "$dir/.launching" ] && [ -z "$(find "$dir/.launching" -mmin +1 2>/dev/null)" ] && continue
+        if [ "$MAX_PARALLEL" -gt 0 ] && [ "$(running_projects)" -ge "$MAX_PARALLEL" ]; then QUEUED=$((QUEUED + 1)); continue; fi
+        pdir="$(awk -F= '$1 == "PROJECT_DIR" { sub(/^[^=]*=/, ""); print }' "$dir/project.env" | tr -d '"')"
+        rm -f "$dir/.idea-request"; : > "$dir/.launching"
+        info "$name -> brain idea open $name"
+        terminal "${pdir:-$BRAIN}" "brain idea open $name" ;;
+      *) rm -f "$dir/.idea-request"; info "$name: the Studio asked for '$verb', which is not something an idea does" ;;
+    esac
+  done
+}
+
+# The Studio's new idea (watch_new): memory/.new/<slug>/text.md is the idea in the human's
+# words, and open.md there asks to start talking right away.
+idea_studio_new() { # slug stage-dir
+  local slug="$1" st="$2" text
+  text="$(cat "$st/text.md" 2>/dev/null || true)"
+  [ -n "$text" ] || { echo "an idea needs at least a line" > "$st/log"; return 1; }
+  info "writing down the idea $slug"
+  (BRAIN_NONINTERACTIVE=1 idea_new "$text" --name "$slug") > "$st/log" 2>&1 || return 1
+  [ ! -f "$st/open.md" ] || echo open > "$MEM/projects/$slug/.idea-request"
+}
+
+# The launcher deleted an idea's record (brain idea rm, brain project rm, the Studio). Its
+# scratch folder goes with it only when everything was asked for, and only when idea_new
+# made it: the marker is written into an empty folder at the start and nowhere else.
+idea_project_deleted() { # name project-dir keep|all
+  local name="$1" dir="$2" mode="$3"
+  [ -n "$dir" ] && [ -d "$dir" ] && [ "$(cat "$dir/.brain-idea" 2>/dev/null)" = "$name" ] || return 0
+  if [ "$mode" = all ]; then
+    rm -rf "$dir" && info "removed its scratch folder $dir"
+  else
+    info "its scratch folder stays: $dir"
+  fi
 }
 
 # One tick of the Studio's Archive, Restore and Delete: a .end-request in the project's
@@ -2687,6 +2945,7 @@ cmd_watch() {
     done
     watch_new
     watch_ends
+    idea_watch
     watch_runs
     watch_apps
     # Under the Docker driver an agent's `docker compose` is a request; this runs it, checked.
@@ -2842,6 +3101,7 @@ app_check() { # dir [name] -> "err|note <problem>" lines; non-zero when any err
     [ -f "$d/cli.sh" ] || { echo "err  app.conf owns kind '$r', but there is no cli.sh to run it"; bad=1; }
     n="$(kind_app "$r" || true)"; [ -z "$n" ] || [ "$n" = "$name" ] || [ "$n" = "${SKIP_APP:-}" ] || { echo "err  kind '$r' is already owned by the app '$n'"; bad=1; }
     { [ -d "$(playbook_dir "$r")" ] || [ -d "$d/playbooks/$r" ]; } && { echo "err  kind '$r' is also a playbook's name"; bad=1; }
+    [ "$r" != idea ] || { echo "err  kind 'idea' is the base's own (brain idea)"; bad=1; }
   fi
   # What its sandboxes may reach and use. A server name is global in sbx, so it is one app's.
   out="$(awk '
@@ -3597,6 +3857,7 @@ cmd_test() {
   reject)      shift; cmd_reject "$@" ;;
   reopen)      shift; cmd_reopen "$@" ;;
   project)     shift; cmd_project "$@" ;;
+  idea)        shift; cmd_idea "$@" ;;
   watch)       shift; cmd_watch "$@" ;;
   *) if app_cli "${1:-}"; then
        a="$1"; shift; declare -F "cmd_$a" >/dev/null || die "the $a app's cli.sh defines no cmd_$a"; "cmd_$a" "$@"
