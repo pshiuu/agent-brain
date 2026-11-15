@@ -53,6 +53,19 @@ LAUNCHED=""; terminal() { LAUNCHED="$2"; }; MAX_PARALLEL=0; info() { :; }
 idea_watch
 is "$LAUNCHED" "brain idea open fresh-one" "the watcher opens the session in a Terminal"
 no "and takes the request" test -e "$P/fresh-one/.idea-request"
+mkdir -p "$DEV/started" "$T/outside"; echo code > "$DEV/started/main.c"
+mkdir -p "$MEM/.new/in-a-folder"; echo "Go on with it" > "$MEM/.new/in-a-folder/text.md"; echo "$DEV/started" > "$MEM/.new/in-a-folder/dir.md"
+idea_studio_new in-a-folder "$MEM/.new/in-a-folder" >/dev/null 2>&1
+has "$(cat "$P/in-a-folder/project.env")" "PROJECT_DIR=$(cd "$DEV/started" && pwd)" "an idea can start in a folder with work in it"
+no "which is not marked as the idea's to delete" test -e "$DEV/started/.brain-idea"
+cmd_idea open in-a-folder >/dev/null 2>&1
+has "$(cat "$T/launched")" "is NOT a scratch folder" "and its session is told the folder is the human's"
+cmd_idea open fresh-one >/dev/null 2>&1
+hasnt "$(cat "$T/launched")" "is NOT a scratch folder" "an idea's own scratch folder is not"
+mkdir -p "$MEM/.new/out"; echo "x y" > "$MEM/.new/out/text.md"; echo "$T/outside" > "$MEM/.new/out/dir.md"
+no "from the Studio, a folder outside ~/dev is refused" idea_studio_new out "$MEM/.new/out"
+has "$(cat "$MEM/.new/out/log")" "--dir" "with the terminal command that does it"
+rm -f "$P/fresh-one/.launching"
 echo "$$ open" > "$P/fresh-one/.idea-running"; echo open > "$P/fresh-one/.idea-request"; LAUNCHED=""; rm -f "$P/fresh-one/.launching"
 idea_watch
 is "$LAUNCHED" "" "an idea that is open is not opened twice"

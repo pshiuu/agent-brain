@@ -74,6 +74,8 @@
 #                                       and start talking about it with an agent that
 #                                       reads your links, researches, keeps a living note
 #                                       and files what it learns. No playbook, no gates
+#   brain idea "<text>" --here          the same, in the folder you are in: work you have
+#                                       started is read first and stays yours (--dir PATH)
 #   brain idea <name> ["what you bring"] [--fresh]
 #                                       carry on where the last session stopped
 #   brain idea                          the ideas you have (new, open, promote, archive, rm:
@@ -2558,6 +2560,7 @@ idea_new() { # "<text>" [--name N] [--dir PATH] -> IDEA_NAME
     case "$1" in
       --name) name="$2"; shift 2 ;;
       --dir)  dir="$2"; shift 2 ;;
+      --here) dir="$PWD"; shift ;;
       -*) die "unknown option $1" ;;
       *) text="${text:+$text }$1"; shift ;;
     esac
@@ -2625,6 +2628,9 @@ Idea: $PROJECT   Idea memory: $PDIR   Scratch folder (the working directory): $P
 Knowledge scope: $(knowledge_scope) — in index.md, read only the Knowledge sections tagged with one of these.
 First read $SYS/BRAIN.md and follow it, except where it speaks of playbooks, phases,
 reviews and handoff files: an idea has none. Your role says what it has instead.
+$( [ "$(cat "$PROJECT_DIR/.brain-idea" 2>/dev/null)" = "$PROJECT" ] || echo "
+The working directory is NOT a scratch folder: it is the human's own, with work already in
+it from before this idea was written down. Your role's 'An existing folder' part applies.")
 ${what:+
 What the human brings to this session: $what
 }
@@ -2745,8 +2751,16 @@ idea_studio_new() { # slug stage-dir
   local slug="$1" st="$2" text
   text="$(cat "$st/text.md" 2>/dev/null || true)"
   [ -n "$text" ] || { echo "an idea needs at least a line" > "$st/log"; return 1; }
+  # A folder the human already works in. From the Studio only one under ~/dev: what is
+  # named here is mounted into a sandbox, and the cockpit has no login. Anywhere else
+  # is a terminal's: brain idea new "<text>" --dir PATH.
+  local dir=""; dir="$(head -1 "$st/dir.md" 2>/dev/null | tr -d '\r' || true)"
+  if [ -n "$dir" ]; then
+    dir="$(cd "${dir/#\~/$HOME}" 2>/dev/null && pwd)" || { echo "that folder does not exist on this Mac" > "$st/log"; return 1; }
+    case "$dir/" in "$(cd "$DEV" && pwd)"/?*) ;; *) echo "from the Studio a folder has to be inside $DEV — for one elsewhere: brain idea new \"<text>\" --dir $dir" > "$st/log"; return 1 ;; esac
+  fi
   info "writing down the idea $slug"
-  (BRAIN_NONINTERACTIVE=1 idea_new "$text" --name "$slug") > "$st/log" 2>&1 || return 1
+  (BRAIN_NONINTERACTIVE=1 idea_new "$text" --name "$slug" ${dir:+--dir "$dir"}) > "$st/log" 2>&1 || return 1
   [ ! -f "$st/open.md" ] || echo open > "$MEM/projects/$slug/.idea-request"
 }
 

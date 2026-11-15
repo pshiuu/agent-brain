@@ -739,21 +739,25 @@ const ideaAsk = async (body, said) => {
 function newIdeaCard () {
   const text = keep($('textarea')); text.rows = 3; text.setAttribute('aria-label', 'The idea')
   text.placeholder = 'The idea, in a line or a few. Links welcome: the agent reads them first.'
+  // Work that has started somewhere is the idea's first source: the agent reads it before anything else.
+  const dir = keep(document.createElement('input')); dir.type = 'text'; dir.setAttribute('aria-label', 'Folder you already work in')
+  dir.placeholder = `Already started? Its folder, e.g. ${S.hostDev.replace(/^\/Users\/[^/]+/, '~')}/fm1-firmware (optional)`
+  dir.style.width = '100%'; dir.style.marginTop = '8px'
   const bar = $('div', 'bar'), talk = btn('primary', 'chat-circle-dots', 'Save and start talking'), save = btn('', 'floppy-disk', 'Just save')
   const go = open => async () => {
     const t = text.value.trim()
     if (!t) return toast('Write the idea down first.')
     talk.disabled = save.disabled = true
     try {
-      const r = await api('/api/idea', { method: 'POST', body: { text: t, open } })
-      delete text.dataset.keep; text.value = ''
+      const r = await api('/api/idea', { method: 'POST', body: { text: t, open, dir: dir.value } })
+      delete text.dataset.keep; delete dir.dataset.keep; text.value = dir.value = ''
       toast(!open ? 'Written down.' : r.watching ? 'Written down. A Terminal window opens on the Mac to talk about it.' : 'Written down. The talk starts as soon as the helper runs.')
       await refresh(); render()
     } catch (e) { toast(e.message); talk.disabled = save.disabled = false }
   }
   talk.onclick = go(true); save.onclick = go(false)
   bar.append(talk, save)
-  return card('A new idea', 'No brief and no plan needed. The agent asks, looks things up and keeps the note.', null, pad(text, bar))
+  return card('A new idea', 'No brief and no plan needed. The agent asks, looks things up and keeps the note.', null, pad(text, dir, bar))
 }
 function ideasView () {
   const rows = S.ideas.map(i => {
@@ -786,7 +790,7 @@ function ideaView (name) {
   const talk = btn('primary', 'chat-circle-dots', i.running ? 'Open in a Terminal window' : 'Talk about it')
   talk.disabled = !!(i.running || i.opening || i.ending)
   talk.onclick = () => { talk.disabled = true; ideaAsk({ name: i.name, action: 'open' }, 'A Terminal window opens on the Mac.') }
-  const parts = [head(ideaTitle(i), i.hostDir ? `Scratch folder: ${i.hostDir}` : '', tagOf(ideaState(i)), talk), watchingNote()]
+  const parts = [head(ideaTitle(i), i.hostDir ? `Folder: ${i.hostDir}` : '', tagOf(ideaState(i)), talk), watchingNote()]
   if (i.error) parts.push(note('err', 'warning-circle', i.error))
   const body = i.note.replace(/^#\s+.*\n+/, '').trim()
   parts.push(card('The note', 'Kept by the agent: rewritten each session, so it is where the idea stands now.', null,

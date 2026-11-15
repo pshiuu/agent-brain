@@ -635,17 +635,29 @@ export function ideas () {
       }
     }).sort((a, b) => String(b.created).localeCompare(String(a.created)) || a.name.localeCompare(b.name))
 }
-/** Write an idea down: its text is the whole request. `open` asks to start talking right away. */
-export function createIdea ({ text, open }) {
+/** Write an idea down: its text is the whole request. `open` asks to start talking right
+ *  away. `dir` is a folder the human already works in — under ~/dev only, the part of
+ *  the Mac the cockpit sees: what is named here gets mounted into a sandbox. */
+export function createIdea ({ text, open, dir }) {
   const t = String(text || '').trim(), slug = ideaSlug(t)
   if (!PLAYBOOK_NAME.test(slug)) throw new HttpError(400, 'write the idea down first: a line is enough')
   if (existsSync(join(MEM, 'projects', slug, 'project.env'))) throw new HttpError(409, `'${slug}' exists already — carry on there, or start this one with other words`)
   const st = join(NEW, slug)
   if (st !== safePath(`memory/.new/${slug}`)) throw new HttpError(400, 'bad path')
   if (existsSync(join(st, 'request')) && !existsSync(join(st, 'error'))) throw new HttpError(409, `'${slug}' is already being written down`)
+  let folder = String(dir || '').trim().replace(/\/+$/, '')
+  if (folder) {
+    if (folder.startsWith('~/')) folder = HOST_DEV.replace(/\/[^/]+$/, '') + folder.slice(1)
+    if (!folder.startsWith('/')) folder = `${HOST_DEV}/${folder}`
+    const seen = folder.startsWith(HOST_DEV + '/') && !folder.split('/').includes('..') ? join(DEV, folder.slice(HOST_DEV.length + 1)) : null
+    if (!seen) throw new HttpError(400, `from the Studio a folder has to be inside ${HOST_DEV} — for one elsewhere, in a terminal: brain idea new "<the idea>" --dir ${folder}`)
+    let st2 = null; try { st2 = statSync(seen) } catch {}
+    if (!st2?.isDirectory()) throw new HttpError(400, `there is no folder ${folder}`)
+  }
   rmSync(st, { recursive: true, force: true })
   mkdirSync(st, { recursive: true })
   writeAtomic(join(st, 'text.md'), t)
+  if (folder) writeAtomic(join(st, 'dir.md'), folder)
   if (open) writeAtomic(join(st, 'open.md'), 'open')
   writeAtomic(join(st, 'request'), `idea ${slug}\n`)
   return { queued: true, idea: slug, watching: watching() }

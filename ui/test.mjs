@@ -974,6 +974,9 @@ it('writes an idea down, lists it apart from the projects, and stages its sessio
     assert.ok(existsSync(join(st, 'open.md')), 'and the wish to start talking')
     throws(() => b.createIdea({ text: 'Custom firmware for the M-Wave FM1 synth' }), /already being written down/)
     throws(() => b.createIdea({ text: '   ' }), /write the idea down first/)
+    throws(() => b.createIdea({ text: 'elsewhere it is', dir: '/etc' }), /has to be inside/)
+    throws(() => b.createIdea({ text: 'elsewhere it is', dir: `${b.HOST_DEV}/../x` }), /has to be inside/)
+    throws(() => b.createIdea({ text: 'elsewhere it is', dir: `${b.HOST_DEV}/no-such-folder-xyz` }), /there is no folder/)
     // What idea_new leaves, as brain watch would have.
     mkdirSync(join(pdir, 'sources'), { recursive: true })
     writeFileSync(join(pdir, 'project.env'), 'KIND=idea\nPROJECT_DIR=/x/ideas/y\nCREATED=2026-11-16\n')
