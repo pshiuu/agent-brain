@@ -38,7 +38,8 @@ at this level or above.
   in the same root (the base or one app). Never write one without the other.
 - **A KIND is an app's, not a playbook's.** A project.env with `KIND=<kind>` (an academy
   workspace) belongs to the app whose `app.conf` says `kind <kind>` — except `KIND=idea`,
-  the base's own (`brain idea`, the `idea_*` functions in bin/brain, role `idea-partner`); `load_project` refuses
+  the base's own (`brain idea`, the `idea_*` functions in bin/brain, roles `idea-partner` to think and
+  `idea-builder` to build); `load_project` refuses
   it and names that app, and the cockpit's project list skips it. The app's host side is its
   `cli.sh` (`cmd_<app>`, `<app>_watch`, `<app>_studio_new`), sourced by `app_cli` — it
   never defines a function outside those names (`brain app check`).

@@ -4,7 +4,9 @@
 # stub here that records what it was handed.
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 fake_brain
-printf 'idea-partner  claude  opus  high\n' >> "$SYS/roles.conf"; printf '# Role: idea-partner\n' > "$SYS/roles/idea-partner.md"
+printf 'idea-partner  claude  opus  high\nidea-builder  claude  opus  medium\n' >> "$SYS/roles.conf"
+printf '# Role: idea-partner\n' > "$SYS/roles/idea-partner.md"; printf '# Role: idea-builder\n' > "$SYS/roles/idea-builder.md"
+printf 'claude t - low,high x\ncodex t - low,high x\n' > "$SYS/engines.conf"
 commit_memory() { :; }
 P="$MEM/projects"
 
@@ -24,7 +26,7 @@ no "a folder that was there before is not marked" test -e "$T/mine/.brain-idea"
 has "$(cd "$DEV/ideas/$N" && (load_project) 2>&1)" "use brain idea" "playbook commands point at brain idea"
 
 section "brain idea: a name carries on, a sentence starts one, a bare word is a typo"
-launch() { echo "$1|$5|${6:-}|$4" > "$T/launched"; }
+launch() { echo "$1|$5|${6:-}|$4" > "$T/launched"; echo "$2" > "$T/model"; }
 role_cfg() { echo "claude opus high"; }
 cmd_idea "$N" >/dev/null 2>&1
 has "$(cat "$T/launched")" "claude|idea-partner|1|" "the session runs the idea's role and resumes the conversation"
@@ -37,6 +39,31 @@ cmd_idea open "$N" "the bootloader" --fresh >/dev/null 2>&1
 has "$(cat "$T/launched")" "Knowledge scope: shared stm32" "a stack word that tags a page widens the scope"
 has "$(cat "$T/launched")" "|idea-partner||" "--fresh starts a new conversation"
 has "$(cat "$T/launched")" "brings to this session: the bootloader" "what the human brought is in the prompt"
+has "$(cat "$T/launched")" "THINKING SESSION" "a session is for thinking unless it is a build"
+cmd_idea open "$N" --engine codex >/dev/null 2>&1
+has "$(cat "$T/launched")" "codex|idea-partner||" "another agent does not continue the first one's conversation"
+has "$(cat "$T/launched")" "codex|idea-partner||" "nor"; is "$(sed -n 1p "$T/model")" "default" "and it gets its own default model, not the role's"
+cmd_idea open "$N" >/dev/null 2>&1
+
+section "thinking changes nothing in the folder; building needs a plan"
+launch() { echo "$1|$5|${6:-}|$4" > "$T/launched"; mkdir -p refs/other spikes/try; echo x > refs/other/a.c; echo x > spikes/try/b.c; echo x > sneaked.c; }
+cmd_idea open "$N" >/dev/null 2>&1
+has "$(cat "$P/$N/idea-error.txt")" "sneaked.c" "a file a thinking session wrote into the folder is reported"
+hasnt "$(cat "$P/$N/idea-error.txt")" "a.c" "what it cloned to learn from is not"
+hasnt "$(cat "$P/$N/idea-error.txt")" "b.c" "nor a throwaway experiment"
+launch() { echo "$1|$5|${6:-}|$4" > "$T/launched"; echo "$2" > "$T/model"; }
+cmd_idea open "$N" >/dev/null 2>&1
+no "a clean session clears the report" test -e "$P/$N/idea-error.txt"
+has "$( (cmd_idea build "$N") 2>&1 )" "has no plan yet" "a build without a plan is refused"
+printf '# Plan\n\n## Steps\n- [ ] one\n' > "$P/$N/plan.md"
+cmd_idea build "$N" --model sonnet >/dev/null 2>&1
+has "$(cat "$T/launched")" "claude|idea-builder||" "a build runs the builder, from the plan, in a conversation of its own"
+has "$(cat "$T/launched")" "BUILD SESSION" "and is told so"
+is "$(cat "$T/model")" "sonnet" "with the model asked for"
+cmd_idea open "$N" >/dev/null 2>&1
+has "$(cat "$T/launched")" "claude|idea-partner||" "thinking after a build is a new conversation"
+rm "$P/$N/plan.md"
+
 has "$( (cmd_idea fm2) 2>&1 )" "no idea 'fm2'" "one word that names no idea creates nothing"
 no "and nothing was created" test -e "$P/fm2"
 cmd_idea "a sampler for the op-1" >/dev/null 2>&1
@@ -52,6 +79,16 @@ is "$(cat "$P/fresh-one/.idea-request")" "open" "and it asked to start talking"
 LAUNCHED=""; terminal() { LAUNCHED="$2"; }; MAX_PARALLEL=0; info() { :; }
 idea_watch
 is "$LAUNCHED" "brain idea open fresh-one" "the watcher opens the session in a Terminal"
+rm -f "$P/fresh-one/.launching"; echo "build codex gpt-6.1-sol high" > "$P/fresh-one/.idea-request"; idea_watch
+is "$LAUNCHED" "brain idea build fresh-one --engine codex --model gpt-6.1-sol --effort high" "with the agent, model and effort its page chose"
+rm -f "$P/fresh-one/.launching"; echo "open - sonnet -" > "$P/fresh-one/.idea-request"; idea_watch
+is "$LAUNCHED" "brain idea open fresh-one --model sonnet" "a dash is the role's own"
+rm -f "$P/fresh-one/.launching"; LAUNCHED=""; echo 'open claude x;rm -' > "$P/fresh-one/.idea-request"; idea_watch
+is "$LAUNCHED" "" "a model that is not a plain word starts nothing"
+echo "open nosuch - -" > "$P/fresh-one/.idea-request"; idea_watch
+is "$LAUNCHED" "" "nor an agent this brain does not have"
+has "$(cat "$P/fresh-one/idea-error.txt")" "does not have" "and the page is told why"
+rm -f "$P/fresh-one/idea-error.txt"
 no "and takes the request" test -e "$P/fresh-one/.idea-request"
 mkdir -p "$DEV/started" "$T/outside"; echo code > "$DEV/started/main.c"
 mkdir -p "$MEM/.new/in-a-folder"; echo "Go on with it" > "$MEM/.new/in-a-folder/text.md"; echo "$DEV/started" > "$MEM/.new/in-a-folder/dir.md"

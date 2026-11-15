@@ -625,10 +625,14 @@ export function ideas () {
         name, title: ((read(join(pdir, 'brief.md')) || '').match(/^#\s+(.+)$/m) || [])[1]?.trim() || null,
         hostDir: env.PROJECT_DIR || '', created: env.CREATED || null,
         note: read(join(pdir, 'idea.md')) || '',
+        // What a build is handed. Written by a thinking session once the human agreed to it.
+        plan: read(join(pdir, 'plan.md')) || '',
+        // The agent the last session ran on, so the page offers to carry on with it.
+        last: (read(join(pdir, '.idea-last')) || '').trim().split(/\s+/)[1] || null,
         sources: ls(join(pdir, 'sources')).filter(d => d.isFile() && !d.name.startsWith('.')).map(d => d.name).sort(),
         // What outlives it: the wiki pages that cite its record.
         taught: pages.filter(k => k.cites.includes(name)).map(k => ({ name: k.name, summary: k.summary })),
-        running: !!(read(join(pdir, '.idea-running')) || '').trim(),
+        running: (read(join(pdir, '.idea-running')) || '').trim().split(/\s+/)[1] || null,
         opening: existsSync(join(pdir, '.idea-request')) || existsSync(join(pdir, '.launching')),
         error: (read(join(pdir, 'idea-error.txt')) || '').trim() || null,
         ownKnowledge: ownKnowledge(name, pages), ...endState(pdir)
@@ -662,17 +666,27 @@ export function createIdea ({ text, open, dir }) {
   writeAtomic(join(st, 'request'), `idea ${slug}\n`)
   return { queued: true, idea: slug, watching: watching() }
 }
-/** `action`: open (a session, in a Terminal on the host) or promote (to `playbook`, which ends up in a command). */
-export function requestIdea ({ name, action, playbook }) {
+/** `action`: open (a thinking session) or build (carry out plan.md), each in a Terminal on
+ *  the host, on `engine` / `model` / `effort` when given and the role's own otherwise; or
+ *  promote (to `playbook`). Everything named here ends up in a command line. */
+const WORD = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$/
+export function requestIdea ({ name, action, playbook, engine = '', model = '', effort = '' }) {
   const dir = ideaDir(name)
   if (existsSync(join(dir, '.idea-request'))) throw new HttpError(409, 'already asked for — it happens within seconds while brain watch runs')
-  if (action === 'open') writeAtomic(join(dir, '.idea-request'), 'open\n')
-  else if (action === 'promote') {
+  if (action === 'open' || action === 'build') {
+    if (action === 'build' && !(read(join(dir, 'plan.md')) || '').trim()) throw new HttpError(400, 'there is no plan yet — talk it through first: building starts from the plan')
+    const e = engines().find(x => x.name === engine)
+    if (engine && !e?.on) throw new HttpError(400, `this brain has no agent '${engine}'`)
+    if (model && !WORD.test(model)) throw new HttpError(400, `'${model}' is not a model name`)
+    if (effort && !(e ? e.efforts : []).includes(effort)) throw new HttpError(400, `'${effort}' is not an effort ${engine || 'that agent'} has`)
+    if ((model || effort) && !engine) throw new HttpError(400, 'a model or an effort needs its agent named')
+    writeAtomic(join(dir, '.idea-request'), `${action} ${engine || '-'} ${model || '-'} ${effort || '-'}\n`)
+  } else if (action === 'promote') {
     if (!PLAYBOOK_NAME.test(String(playbook || '')) || !existsSync(join(playbookDir(playbook), 'phases'))) throw new HttpError(400, `no playbook '${playbook}'`)
     if ((read(join(dir, '.idea-running')) || '').trim()) throw new HttpError(409, 'the idea is open in a Terminal window — end that session first')
     rmSync(join(dir, 'idea-error.txt'), { force: true })
     writeAtomic(join(dir, '.idea-request'), `promote ${playbook}\n`)
-  } else throw new HttpError(400, `'${action}' is not something an idea does — open or promote`)
+  } else throw new HttpError(400, `'${action}' is not something an idea does — open, build or promote`)
   return { requested: action, watching: watching() }
 }
 

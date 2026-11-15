@@ -18,7 +18,9 @@ One local server, two front ends on the same API:
   **Improvements**, the agents' proposals in plain words, each with **Accept** and
   **Decline**, and **Apply accepted** for `brain evolve`; **Ideas**, a box to write a
   thought down in a line (links welcome), each idea's note, sources and what it taught,
-  **Talk about it** (a Terminal window with `brain idea <name>`) and **Make it a project**;
+  **Work on it** with the agent, model and effort for this one session, as **Talk it
+  through** (`brain idea <name>`, changes nothing in the folder) or **Build the plan**
+  (`brain idea build`, once the talk left one), and **Make it a project**;
   and **Clients**. A project's
   Progress tab ends with **Archive** (out of every list, record kept, **Restore** from the
   folded Archived card under the list) and **Delete**, which asks at that moment whether

@@ -491,6 +491,28 @@ denies "and the request is dropped, since that one carries on" test -f "$MEM/pro
 echo 999999 > "$MEM/projects/a/.waiting"; echo auto > "$MEM/projects/a/.run-request"; LAUNCHED=""; watch_runs
 is "$LAUNCHED" " a" "a waiting marker left by a dead launcher does not block"
 
+section "the skill store check at launch"
+OLDHOME="$HOME"; HOME="$T/home"; mkdir -p "$HOME/.agents/skills" "$SYS/skills/mine" "$SYS/skills/yours"
+echo x > "$SYS/skills/mine/SKILL.md"; echo x > "$SYS/skills/yours/SKILL.md"
+sbx() { case "$1 ${2:-}" in "skills ls") printf 'Skills store: x\nmine\nyours\n' ;; esac; return 0; }
+eval "$(declare -f cmd_sync_skills | sed '1s/.*/real_sync_skills ()/')"   # kept, so the stub below can go again
+( real_sync_skills ) >/dev/null 2>&1
+is "$(readlink "$HOME/.agents/skills/mine")" "$SYS/skills/mine" "a brain skill is linked into ~/.agents/skills"
+SYNCED=""; cmd_sync_skills() { SYNCED=1; }
+ensure_skills; is "$SYNCED" "" "linked and in the store: a launch syncs nothing"
+rm "$HOME/.agents/skills/yours"; mkdir "$HOME/.agents/skills/yours"; echo own > "$HOME/.agents/skills/yours/SKILL.md"
+ln -s "$SYS/skills/yours" "$HOME/.agents/skills/yours/yours"   # what ln -sfn left there before
+ensure_skills; is "$SYNCED" "" "a folder of your own with a skill's name does not make every launch sync"
+info() { echo "$*"; }
+has "$( (real_sync_skills) 2>&1 )" "folder of your own" "the sync says whose skill the sandboxes get"
+info() { :; }
+is "$(cat "$HOME/.agents/skills/yours/SKILL.md")" "own" "and leaves yours as it is"
+no "minus the link an older sync put inside it" test -e "$HOME/.agents/skills/yours/yours"
+rm "$HOME/.agents/skills/mine"
+ensure_skills; is "$SYNCED" "1" "a link that is really missing still does"
+eval "$(declare -f real_sync_skills | sed '1s/.*/cmd_sync_skills ()/')"; unset -f real_sync_skills
+HOME="$OLDHOME"; sbx() { return 0; }; rm -rf "$SYS/skills/mine" "$SYS/skills/yours"
+
 section "brain watch — a one-shot sandbox a dead run left behind"
 SBXLS=$'SANDBOX AGENT STATUS\nbrain-self-claude claude stopped\nproj-claude claude stopped'; REMOVED=""
 sbx() { case "$1" in ls) printf '%s\n' "$SBXLS" ;; rm) REMOVED="$REMOVED $3" ;; esac; }

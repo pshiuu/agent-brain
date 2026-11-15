@@ -78,6 +78,10 @@
 #                                       started is read first and stays yours (--dir PATH)
 #   brain idea <name> ["what you bring"] [--fresh]
 #                                       carry on where the last session stopped
+#   brain idea build <name>             carry out the plan the thinking left (plan.md), with
+#                                       the idea-builder role: another agent or model if
+#                                       you like (--engine, --model). Thinking sessions
+#                                       change nothing in the folder; this one does
 #   brain idea                          the ideas you have (new, open, promote, archive, rm:
 #                                       docs/commands.md)
 #   brain project archive <name>        a project out of every list: its record moves to
@@ -520,7 +524,8 @@ ensure_skills() {
   have=" $(sbx skills ls 2>/dev/null | awk 'NR > 1 && NF == 1' | tr '\n' ' ') "
   for d in $(skill_dirs); do
     s="$(basename "$d")"
-    [ "$(readlink "$HOME/.agents/skills/$s" 2>/dev/null)" = "${d%/}" ] || want=1
+    # A folder of your own with that name cannot be linked (cmd_sync_skills says so): not a reason to sync.
+    [ "$(readlink "$HOME/.agents/skills/$s" 2>/dev/null)" = "${d%/}" ] || { [ -d "$HOME/.agents/skills/$s" ] && [ ! -L "$HOME/.agents/skills/$s" ]; } || want=1
     case "$have" in *" $s "*) ;; *) want=1 ;; esac
   done
   if :; then
@@ -843,8 +848,18 @@ cmd_sync_skills() {
   #    Note: `sbx skills import` imports EVERY skill from all agent folders on this Mac.
   mkdir -p "$HOME/.agents/skills"
   local d
+  local own
   for d in $(skill_dirs); do
-    ln -sfn "${d%/}" "$HOME/.agents/skills/$(basename "$d")"
+    own="$HOME/.agents/skills/$(basename "$d")"
+    # A real folder there is a skill of your own with the same name. ln would put the link
+    # inside it, the store would keep getting yours, and ensure_skills would see a missing
+    # link at every launch and sync all of this again — minutes, each time. It is left alone.
+    if [ -d "$own" ] && [ ! -L "$own" ]; then
+      [ "$(readlink "$own/$(basename "$d")" 2>/dev/null)" != "${d%/}" ] || rm -f "$own/$(basename "$d")"   # the link an older sync left inside
+      info "⚠ ~/.agents/skills/$(basename "$d") is a folder of your own with the name of this brain's skill — sandboxes get yours. Rename or remove it to get the brain's"
+      continue
+    fi
+    ln -sfn "${d%/}" "$own"
   done
   sbx skills import --force >/dev/null 2>&1 || sbx skills import --force
   info "own skills imported: $(skill_dirs | xargs -n1 basename | tr "\n" " ")"
@@ -2595,53 +2610,104 @@ idea_new() { # "<text>" [--name N] [--dir PATH] -> IDEA_NAME
   echo "  talk:    brain idea $name"
 }
 
-idea_open() { # name [words...] [--engine E] [--model M] [--effort L] [--fresh]
-  local engine="" model="" effort="" what="" resume=1 name="${1:-}"; [ $# -gt 0 ] && shift
+# One session on an idea, in one of two modes. `think` is the default and the point of an
+# idea: the idea-partner asks, researches and plans, and changes nothing in the folder
+# beyond its own corners (refs/, crawl/, spikes/). `build` carries out the plan the
+# thinking produced, with the idea-builder — a role of its own, so it can be another
+# agent or model than the one you think with. The host checks the first after the fact:
+# an instruction not to touch the code is an exhortation, a list of the files that
+# changed is a check.
+idea_session() { # think|build name [words...] [--engine E] [--model M] [--effort L] [--fresh]
+  local mode="$1" engine="" model="" effort="" what="" fresh="" name="${2:-}"; shift; [ $# -gt 0 ] && shift
   while [ $# -gt 0 ]; do
     case "$1" in
       --engine) engine="$2"; shift 2 ;;
       --model)  model="$2";  shift 2 ;;
       --effort) effort="$2"; shift 2 ;;
-      --fresh)  resume=""; shift ;;
+      --fresh)  fresh=1; shift ;;
       -*) die "unknown option $1" ;;
       *) what="${what:+$what }$1"; shift ;;
     esac
   done
   idea_load "$name"
   rm -f "$PDIR/.launching"
+  local role=idea-partner; [ "$mode" = think ] || role=idea-builder
+  [ "$mode" = think ] || [ -s "$PDIR/plan.md" ] || die "'$PROJECT' has no plan yet — think it through first (brain idea $PROJECT): building starts from memory/projects/$PROJECT/plan.md"
   local pid; pid="$(awk '{ print $1; exit }' "$PDIR/.idea-running" 2>/dev/null || true)"
   [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null || die "'$PROJECT' is open in another window"
   local r_engine r_model r_effort
-  read -r r_engine r_model r_effort <<< "$(role_cfg idea-partner)"
+  read -r r_engine r_model r_effort <<< "$(role_cfg "$role")"
+  # Another agent than the role's own brings its own default model: the role's would be a name it does not know.
+  if [ -n "$engine" ] && [ "$engine" != "$r_engine" ]; then r_model=default; r_effort=""; fi
   engine="${engine:-$r_engine}"; model="${model:-$r_model}"; effort="${effort:-$r_effort}"
   mkdir -p "$PROJECT_DIR"; cd "$PROJECT_DIR"
+  # The conversation is carried on only when the last session was the same kind with the
+  # same agent: a build is not the continuation of a talk, nor Codex of Claude.
+  local resume="" last; last="$(cat "$PDIR/.idea-last" 2>/dev/null || true)"
+  [ -n "$fresh" ] || { [ -n "$last" ] && [ "$last" != "$mode $engine" ]; } || resume=1
+  [ "$mode" = think ] || resume=""   # a build starts from the plan, every time
 
-  # The Studio reads this to say the idea is being talked about; brain watch, to start
-  # nothing else here.
-  printf '%s open\n' "$$" > "$PDIR/.idea-running"
+  # The Studio reads this to say the idea is being worked on; brain watch, to start nothing
+  # else here. Its time is also what the check after a thinking session compares against.
+  printf '%s %s\n' "$$" "$mode" > "$PDIR/.idea-running"; rm -f "$PDIR/idea-error.txt"
   trap 'rm -f "$PDIR/.idea-running"' EXIT INT TERM
+  local own=""; [ "$(cat "$PROJECT_DIR/.brain-idea" 2>/dev/null)" != "$PROJECT" ] || own=1
 
   local prompt="You are working inside the agent brain system, on an idea — not a playbook run.
 Brain instructions (read-only): $SYS
 Brain memory (read-write):      $MEM
-Idea: $PROJECT   Idea memory: $PDIR   Scratch folder (the working directory): $PROJECT_DIR
+Idea: $PROJECT   Idea memory: $PDIR   Working directory: $PROJECT_DIR
 Knowledge scope: $(knowledge_scope) — in index.md, read only the Knowledge sections tagged with one of these.
 First read $SYS/BRAIN.md and follow it, except where it speaks of playbooks, phases,
 reviews and handoff files: an idea has none. Your role says what it has instead.
-$( [ "$(cat "$PROJECT_DIR/.brain-idea" 2>/dev/null)" = "$PROJECT" ] || echo "
+$( [ -n "$own" ] || echo "
 The working directory is NOT a scratch folder: it is the human's own, with work already in
 it from before this idea was written down. Your role's 'An existing folder' part applies.")
+$( if [ "$mode" = think ]; then echo "
+THIS IS A THINKING SESSION. You do not create, change or delete any file in the working
+directory outside refs/, crawl/ and spikes/. Not to fix something small, not because the
+human says 'just do it': building is a session of its own (brain idea build $PROJECT), with
+the plan you leave in $PDIR/plan.md. The host lists every file that changed when you exit."
+  else echo "
+THIS IS A BUILD SESSION. The plan is $PDIR/plan.md: carry out its next open step, as your role says."; fi)
 ${what:+
 What the human brings to this session: $what
 }
-Start as your role says: where the idea stands, what you would do next, then ask."
-  local rc=0
-  launch "$engine" "$model" "$effort" "$prompt" idea-partner "$resume" || rc=$?
+Start as your role says."
+  # What the folder looked like before: in a repo git says it exactly (and leaves out what
+  # the repo ignores, a build's output); elsewhere the marker's time has to do.
+  local rc=0 touched="" before="" head_before="" is_git=""
+  idea_changes() { git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | grep -vE '^.. "?(refs|crawl|spikes)/|\.brain-idea$' | sort || true; }
+  if [ "$mode" = think ] && git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+    is_git=1; before="$(idea_changes)"; head_before="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || true)"
+  fi
+  launch "$engine" "$model" "$effort" "$prompt" "$role" "$resume" || rc=$?
+  if [ "$mode" != think ]; then :
+  elif [ -n "$is_git" ]; then
+    touched="$(comm -13 <(printf '%s\n' "$before") <(idea_changes) | grep . | head -20 || true)"
+    [ "$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || true)" = "$head_before" ] \
+      || touched="${touched:+$touched$'\n'}new commits since ${head_before:0:8}: git -C $PROJECT_DIR log ${head_before:0:8}..HEAD"
+  else
+    # ponytail: finds what was written or added, not what was deleted — there is no record to compare with.
+    touched="$(find "$PROJECT_DIR" -type f -newer "$PDIR/.idea-running" \
+      -not -path '*/refs/*' -not -path '*/crawl/*' -not -path '*/spikes/*' -not -path '*/node_modules/*' \
+      -not -name .brain-idea 2>/dev/null | sed "s|^$PROJECT_DIR/||" | head -20 || true)"
+  fi
+  unset -f idea_changes
   rm -f "$PDIR/.idea-running"; trap - EXIT INT TERM
+  echo "$mode $engine" > "$PDIR/.idea-last"
+  if [ -n "$touched" ]; then
+    { echo "The thinking session changed files in $PROJECT_DIR, which it is not meant to:"
+      printf '%s\n' "$touched" | sed 's/^/  /'
+      echo "Look at them before you keep them$( [ -d "$PROJECT_DIR/.git" ] && echo ": git -C $PROJECT_DIR status" )."
+    } > "$PDIR/idea-error.txt"
+    echo; sed 's/^/▸ ⚠ /' "$PDIR/idea-error.txt"
+  fi
   # What the session wrote into the wiki is this brain's now, whatever becomes of the idea.
   commit_memory "idea $PROJECT"
   [ "$rc" -eq 0 ] || info "the session ended with $rc — brain idea $PROJECT carries on where it stopped"
   echo "  note: $PDIR/idea.md"
+  [ ! -s "$PDIR/plan.md" ] || echo "  plan: $PDIR/plan.md   (build it: brain idea build $PROJECT)"
 }
 
 # An idea that has earned a real project: the same folder in memory and the same scratch
@@ -2655,6 +2721,7 @@ idea_promote() { # name playbook
   stack="$(brief_body '## Stack' "$PDIR/brief.md" | grep -v '^[[:space:]]*<!--' | grep -v '^[[:space:]]*-->' | grep -v '^     ' | grep -v '^-[[:space:]]*$' || true)"
   mkdir -p "$PDIR/phases" "$PDIR/qa" "$PDIR/sources"
   mv "$PDIR/brief.md" "$PDIR/sources/idea-brief.md"; mv "$PDIR/idea.md" "$PDIR/sources/idea.md"
+  [ ! -f "$PDIR/plan.md" ] || mv "$PDIR/plan.md" "$PDIR/sources/idea-plan.md"
   # The idea's own words go under the brief's Goal and its stack under Stack, when the
   # playbook's brief has those headings; the rest of the brief is the human's to fill.
   # Through the environment: awk -v refuses a value with a newline in it.
@@ -2669,7 +2736,7 @@ idea_promote() { # name playbook
     [[ "$ints" =~ ^[a-z0-9][a-z0-9-]*$ ]] && printf 'INTEGRATIONS=%s\n' "$ints"
   } > "$PDIR/project.env.new" || true
   mv "$PDIR/project.env.new" "$PDIR/project.env"
-  printf '%s — this project grew out of an idea — what was found before it started is in sources/idea.md (the note) and sources/idea-brief.md (how it began); read both before the brief\n' "$(date +%F)" >> "$PDIR/decisions.md"
+  printf '%s — this project grew out of an idea — what was found before it started is in sources/idea.md (the note), sources/idea-brief.md (how it began) and, when there was one, sources/idea-plan.md; read them before the brief\n' "$(date +%F)" >> "$PDIR/decisions.md"
   rm -f "$PROJECT_DIR/.brain-idea"
   info "'$PROJECT' is now a $pb project"
   echo "  brief: $PDIR/brief.md   (fill in what the playbook asks for)"
@@ -2696,18 +2763,19 @@ cmd_idea() {
   case "$verb" in
     list)    idea_list ;;
     new)     idea_new "$@" ;;
-    open)    idea_open "$@" ;;
+    open)    idea_session think "$@" ;;
+    build)   idea_session build "$@" ;;
     promote) idea_promote "$@" ;;
     archive) idea_is "${1:-}" || die "no idea '${1:-}'"; out="$(project_archive "$1")" || die "$out"; info "$out" ;;
     rm)      idea_rm "$@" ;;
-    -*)      die "usage: brain idea [\"<text>\" | <name> | new | open | promote | archive | rm] — run brain with no arguments for help" ;;
-    *) if idea_is "$verb"; then idea_open "$verb" "$@"
+    -*)      die "usage: brain idea [\"<text>\" | <name> | new | open | build | promote | archive | rm] — run brain with no arguments for help" ;;
+    *) if idea_is "$verb"; then idea_session think "$verb" "$@"
        else
          # Anything that is not an idea's name is a new idea, in its own words. One bare
          # word is more likely a name typed wrong than an idea.
          case "$verb $*" in *' '?*) ;; *) die "no idea '$verb' — brain idea lists them. A new one: brain idea new \"$verb\"" ;; esac
          idea_new "$verb" "$@"
-         if interactive; then idea_open "$IDEA_NAME"; fi
+         if interactive; then idea_session think "$IDEA_NAME"; fi
        fi ;;
   esac
 }
@@ -2715,20 +2783,29 @@ cmd_idea() {
 # One tick for the ideas: what their pages in the Studio asked for. `open` gets a Terminal
 # window like every run; `promote <playbook>` needs none.
 idea_watch() {
-  local dir name pdir pid verb arg
+  local dir name pdir pid verb arg model effort opts
   for dir in "$MEM"/projects/*/; do
     name="$(basename "$dir")"; dir="${dir%/}"
     idea_is "$name" || continue
     # A Terminal window that never got as far as the session: the page would say Opening for good.
     [ ! -f "$dir/.launching" ] || [ -z "$(find "$dir/.launching" -mmin +1 2>/dev/null)" ] || rm -f "$dir/.launching"
     [ -f "$dir/.idea-request" ] || continue
-    read -r verb arg < "$dir/.idea-request" || true
+    read -r verb arg model effort < "$dir/.idea-request" || true
     case "$verb" in
       promote)
         rm -f "$dir/.idea-request" "$dir/idea-error.txt"
         ( idea_promote "$name" "$arg" ) > "$dir/.idea-log" 2>&1 || tail -1 "$dir/.idea-log" > "$dir/idea-error.txt"
         info "$name: $(tail -1 "$dir/.idea-log")"; rm -f "$dir/.idea-log" ;;
-      open)
+      open|build)
+        # `<verb> [engine model effort]`, each `-` for the role's own. They end up in a
+        # command line, so each is a plain word and the agent one this brain has.
+        opts=""
+        for pid in "$arg" "$model" "$effort"; do [[ "${pid:--}" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*$|^-$ ]] || opts=bad; done
+        [ "${arg:--}" = - ] || engine_on "$arg" || opts=bad
+        if [ "$opts" = bad ]; then rm -f "$dir/.idea-request"; echo "the Studio asked for an agent or model this brain does not have: ${arg:-} ${model:-} ${effort:-}" > "$dir/idea-error.txt"; info "$name: bad agent or model in the request — dropped"; continue; fi
+        [ "${arg:--}" = - ] || opts="$opts --engine $arg"
+        [ "${model:--}" = - ] || opts="$opts --model $model"
+        [ "${effort:--}" = - ] || opts="$opts --effort $effort"
         if [ -f "$dir/.idea-running" ]; then
           pid="$(awk '{ print $1; exit }' "$dir/.idea-running")"
           if kill -0 "$pid" 2>/dev/null; then rm -f "$dir/.idea-request"; continue; fi   # it is open already
@@ -2738,8 +2815,8 @@ idea_watch() {
         if [ "$MAX_PARALLEL" -gt 0 ] && [ "$(running_projects)" -ge "$MAX_PARALLEL" ]; then QUEUED=$((QUEUED + 1)); continue; fi
         pdir="$(awk -F= '$1 == "PROJECT_DIR" { sub(/^[^=]*=/, ""); print }' "$dir/project.env" | tr -d '"')"
         rm -f "$dir/.idea-request"; : > "$dir/.launching"
-        info "$name -> brain idea open $name"
-        terminal "${pdir:-$BRAIN}" "brain idea open $name" ;;
+        info "$name -> brain idea $verb $name$opts"
+        terminal "${pdir:-$BRAIN}" "brain idea $verb $name$opts" ;;
       *) rm -f "$dir/.idea-request"; info "$name: the Studio asked for '$verb', which is not something an idea does" ;;
     esac
   done

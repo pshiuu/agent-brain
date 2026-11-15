@@ -730,7 +730,7 @@ function improvementsView () {
    a real project, in the archive, or deleted with the choice of what stays. */
 const ideaTitle = i => i.title || human(i.name)
 const ideaState = i => i.ending ? { key: 'queued', label: i.ending === 'archive' ? 'Being archived' : 'Being deleted', icon: 'clock' }
-  : i.running ? { key: 'work', label: 'Being talked about', icon: 'circle-notch' }
+  : i.running ? { key: 'work', label: i.running === 'build' ? 'Being built' : 'Being talked about', icon: 'circle-notch' }
     : i.opening ? { key: 'queued', label: 'Opening', icon: 'clock' } : { key: 'paused', label: 'Resting', icon: 'moon' }
 const ideaAsk = async (body, said) => {
   try { const r = await api('/api/idea', { method: 'POST', body }); toast(r.watching ? said : 'Saved. It happens as soon as the helper runs.'); await refresh(); render() }
@@ -779,6 +779,51 @@ function ideasView () {
       : card('Your ideas', '', null, empty('sparkle', 'Nothing written down yet', 'Start with one line above. It can be half a thought.')),
     archivedCard(a => a.kind === 'idea'))
 }
+/* Which agent works on the idea right now, and what it does: talk it through (asks,
+   researches, plans, changes nothing in the folder) or build the plan the talk left. The
+   two are different roles, so they can be different models; the choice here is for this
+   one session and is remembered in this browser. */
+const IDEA_AGENT = 'brain-idea-agent'
+function ideaWorkCard (i) {
+  const role = S.roles.find(r => r.role === 'idea-partner') || {}
+  const engines = S.engines.filter(e => e.on)
+  let saved = {}; try { saved = JSON.parse(localStorage.getItem(IDEA_AGENT) || '{}') } catch {}
+  const sel = (label, opts, value) => {
+    const el = $('select', 'chip'); el.setAttribute('aria-label', label)
+    for (const [v, t] of opts) el.append(Object.assign(document.createElement('option'), { value: v, textContent: t, selected: v === value }))
+    return el
+  }
+  const start = engines.some(e => e.name === saved.engine) ? saved.engine : engines.some(e => e.name === i.last) ? i.last : role.engine || engines[0]?.name || ''
+  const engine = sel('Agent', engines.map(e => [e.name, e.label]), start), slot = $('span'); slot.style.display = 'contents'
+  let model, effort
+  const fill = () => {
+    const e = engine.value, m = S.models[e] || { options: [], efforts: [] }
+    const want = saved.engine === e ? saved.model : e === role.engine ? role.model : 'default'
+    const names = m.options.map(o => o.slug)
+    model = sel('Model', [...(names.includes(want) || !want ? [] : [[want, want]]), ...m.options.map(o => [o.slug, o.label === o.slug ? o.slug : `${o.label}`])], want)
+    const eff = saved.engine === e ? saved.effort || '' : e === role.engine ? role.effort || '' : ''
+    effort = sel('Effort', [['', 'Default effort'], ...(S.engines.find(x => x.name === e)?.efforts || []).map(x => [x, `Effort: ${x}`])], eff)
+    slot.textContent = ''; slot.append(model, effort)
+  }
+  engine.onchange = () => { saved = {}; fill() }
+  fill()
+  const busy = !!(i.running || i.opening || i.ending), hasPlan = !!i.plan.trim()
+  const talk = btn(hasPlan ? '' : 'primary', 'chat-circle-dots', 'Talk it through'), build = btn(hasPlan ? 'primary' : '', 'hammer', 'Build the plan')
+  talk.disabled = busy; build.disabled = busy || !hasPlan
+  if (!hasPlan) build.title = 'There is no plan yet. Talk it through first: the talk ends with one.'
+  const go = action => () => {
+    talk.disabled = build.disabled = true
+    try { localStorage.setItem(IDEA_AGENT, JSON.stringify({ engine: engine.value, model: model.value, effort: effort.value })) } catch {}
+    ideaAsk({ name: i.name, action, engine: engine.value, model: model.value, effort: effort.value }, 'A Terminal window opens on the Mac.')
+  }
+  talk.onclick = go('open'); build.onclick = go('build')
+  const pick = $('div', 'bar'), acts = $('div', 'bar'); pick.append(engine, slot); acts.append(talk, build)
+  const sub = i.running ? `Open in a Terminal window on the Mac: ${i.running === 'build' ? 'the plan is being built' : 'being talked through'}.`
+    : hasPlan ? 'There is a plan. Build it, with the same agent or another, or talk it through again to change it.'
+      : 'Talking asks, researches and plans, and changes nothing in the folder. Building comes after, from the plan.'
+  return card('Work on it', sub, null, pad(pick, acts))
+}
+
 function ideaView (name) {
   const i = S.ideas.find(x => x.name === name)
   if (!i) {
@@ -787,14 +832,17 @@ function ideaView (name) {
       ? card('Now a project', '', null, empty('rocket-launch', 'This idea became a project', 'A playbook runs it now, with what was found before in its sources.', link(`#/a/${encodeURIComponent(name)}`, 'btn primary', 'Open the project')))
       : card('Not found', '', null, empty('magnifying-glass', 'No such idea', `There is no idea called ${name}. It may have been archived or deleted.`, link('#/ideas', 'btn', 'All ideas'))))
   }
-  const talk = btn('primary', 'chat-circle-dots', i.running ? 'Open in a Terminal window' : 'Talk about it')
-  talk.disabled = !!(i.running || i.opening || i.ending)
-  talk.onclick = () => { talk.disabled = true; ideaAsk({ name: i.name, action: 'open' }, 'A Terminal window opens on the Mac.') }
-  const parts = [head(ideaTitle(i), i.hostDir ? `Folder: ${i.hostDir}` : '', tagOf(ideaState(i)), talk), watchingNote()]
+  const parts = [head(ideaTitle(i), i.hostDir ? `Folder: ${i.hostDir}` : '', tagOf(ideaState(i))), watchingNote(), ideaWorkCard(i)]
   if (i.error) parts.push(note('err', 'warning-circle', i.error))
   const body = i.note.replace(/^#\s+.*\n+/, '').trim()
   parts.push(card('The note', 'Kept by the agent: rewritten each session, so it is where the idea stands now.', null,
     pad(body ? md(body) : $('p', 'dim', 'Nothing yet. The first session writes it.'))))
+  if (i.plan.trim()) {
+    const all = (i.plan.match(/^\s*- \[[ xX]\]/gm) || []).length, done = (i.plan.match(/^\s*- \[[xX]\]/gm) || []).length
+    parts.push(card('The plan', 'What a build session is handed, agreed in the talk. Change it by talking it through again.',
+      all ? tagOf(done === all ? { key: 'done', label: 'All steps done', icon: 'check-circle' } : { key: 'paused', label: `${done} of ${all} steps done`, icon: 'list-checks' }) : null,
+      pad(md(i.plan.replace(/^#\s+.*\n+/, '')))))
+  }
   if (i.sources.length) {
     const ul = $('ul'); ul.append(...i.sources.map(f => $('li', '', f)))
     parts.push(card('Sources', 'What it looked up and saved, so a claim can be checked after the site is gone.', null, pad(ul)))
