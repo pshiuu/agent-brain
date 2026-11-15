@@ -14,6 +14,7 @@ brain new new-website acme-site          # or pass them; creates ~/dev/acme-site
 cd ~/dev/acme-site
 brain run                                # runs the next phase with the right agent
 brain status                             # progress
+brain project archive <name>             # done with it: out of every list, record kept
 brain auto                               # run phases back to back
 brain open                               # free session with brain + memory loaded
 brain open --engine codex
@@ -88,6 +89,8 @@ from inside the project folder.
 | `test/state.sh` | — | the phase state machine, without a sandbox: what runs next, when a phase is finished, and every way `brain auto` can stop. Run it after touching `bin/brain` |
 | `brain approve [phase]` | `--defer ID` | turns the summary's verdict line into `RESULT: PASS` and keeps the rest. Every `OPEN` defect becomes `WAIVED`, `VERIFIED` when a fix round landed since and names it, or `DEFERRED` when you pass its id. Defaults to the next phase |
 | `brain reject <phase> "..." ["..."]` | — | writes `RESULT: FAIL` plus your points as a numbered list and as `OPEN` defects the fixer must answer. Each argument is one item. Needs a fix-role on that phase |
+| `brain project archive <name>` | — | takes a project out of every list: its record moves to `memory/projects/.archive/<name>/` (local and untracked like every project's) and its sandboxes are removed. Refused while it runs. `brain project restore <name>` brings it back, `brain project list` shows the archive. The Studio's **Archive** and **Restore** stage `.end-request` in the project's folder for `brain watch` |
+| `brain project rm <name>` | `--knowledge`<br>`--yes` | deletes a project's record, active or archived, for good; asks you to type its name unless `--yes`. Its code folder is never touched. What it taught the wiki stays, unless `--knowledge`: then the pages whose every `projects/` citation is this project go too (and leave `index.md`), committed to the memory repo, which is the undo. The Studio's **Delete** asks the same choice |
 | `brain reopen <phase> "..." ["..."]` | — | sends the playbook back to `<phase>`: it and every later phase lose their `.done` (kept in the record) and run again. A work phase keeps its summary and gets your points appended. The way back from a gate with no fix-role |
 | `brain watch` | `install`<br>`uninstall` | host-side bridge for the cockpit: creates the projects its New project form staged, opens a Terminal window running `brain run` or `brain auto` for its Run and verdict buttons (at most `BRAIN_MAX_PARALLEL` projects at once; the rest wait), `brain playbook draft` for its Draft button, `brain evolve` for Evolve, and commits what its Install button put into `system/`. Runs until you stop it. `install` makes it a login item so nobody has to start it; `uninstall` removes that |
 | `brain sync-skills` | — | re-links `system/skills/*`, installs `skills.list`, and removes anything not on the keep list |

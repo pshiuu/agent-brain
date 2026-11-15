@@ -93,11 +93,15 @@ it is needed and calls, by name:
 | `cmd_<name>` | `brain <name> <verb> [args]` — required in every `cli.sh` |
 | `<name>_watch` | every `brain watch` tick (move in what the Studio staged, start a queued run) |
 | `<name>_studio_new <slug> <stage-dir>` | the Studio's New form asked for the app's `kind`; `memory/.new/<slug>/` holds what the form wrote. Non-zero leaves `log` there as the error |
+| `<name>_project_deleted <project> <project-dir> keep\|all` | a project of the app's `kind` was deleted (`brain project rm`, the Studio); its record is gone already. For what the app made outside memory — the idea app's scratch folder. `all` means the human asked for everything to go |
 
 Everything else it defines starts with `<name>_`, so nothing it sources replaces a function
 of the launcher. It may call these of the launcher's, and no others — the rest changes
 without notice: `launch`, `role_cfg`, `sandbox_name`, `project_name`, `slug`, `fill_brief`,
-`interactive`, `ask`, `info`, `die`, `terminal`, `running_projects`, `sbx`; and read
+`interactive`, `ask`, `info`, `die`, `terminal`, `running_projects`, `sbx`, `commit_memory`,
+`playbook_dir`, `brief_body`, `knowledge_scope` (set `PLAYBOOK` and `PDIR` first),
+`project_archive`, `project_restore`, `project_delete <name> keep|all` and `project_pages`
+(these four print their result or their refusal and return non-zero on one); and read
 `BRAIN`, `SYS`, `MEM`, `DEV`, `PROJECT`, `PDIR`, `PHASE_TIMEOUT`, `MAX_PARALLEL`, `QUEUED`.
 
 A `kind` is how a project that is not a playbook run belongs to the app: its `project.env`
@@ -119,6 +123,7 @@ tests can import it too). Its default export is called once with the kit:
 | `request(project, file, { content \| data, prev, against })` | stages `.<name>-request` (one at a time), `inbox/<file>` (`data`, base64) or `<name>.staged` (with `prev`: refused when the workspace's `against` file changed) in `memory/projects/<p>/`. `<name>_watch` in `cli.sh` takes it from there |
 | `create(name, files)` | a new project of the app's kind: `memory/.new/<slug>/` with `files` and the request; `<name>_studio_new` makes it |
 | `api`, `upload`, `inputsForm`, `projectTable`, `sorted`, `status`, `titleOf`, `clientName`, `newButton` | the rest of the cockpit, for an app built on the Studio's own pages (the clients app) |
+| `endCard(project, backHref, folderNote?)`, `archivedCard(filter)` | a project's end, the same on every page: Archive and Delete (asking whether the knowledge only it backs stays) for one entry of `state.projects` or `state.apps[].projects`, and the folded list of `state.archivedProjects` a page is about, with Restore and Delete |
 | `frame`, `head`, `card`, `pad`, `table`, `td`, `rowLink`, `empty`, `note`, `toast`, `keep`, `link`, `btn`, `withIcon`, `tagOf`, `watchingNote`, `human`, `ago`, `$`, `icon`, `md`, `graphView`, `readB64` | the Studio's own building blocks, so an app's pages look like the rest |
 
 The cockpit runs no app code on its server: it serves `ui/` as files and answers the two

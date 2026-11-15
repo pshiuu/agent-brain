@@ -70,6 +70,13 @@
 #   brain reject <phase> "feedback"     send a phase with a fix-role back with feedback
 #   brain reopen <phase> "feedback"     send the playbook back to <phase>: it and every
 #                                       later phase run again (launch-gate's way back)
+#   brain project archive <name>        a project out of every list: its record moves to
+#                                       memory/projects/.archive/, its sandboxes go;
+#                                       `restore <name>` brings it back, `list` shows them
+#   brain project rm <name> [--knowledge] [--yes]
+#                                       its record for good. Its code folder stays, and so
+#                                       does what it taught the wiki — unless --knowledge,
+#                                       which deletes the pages only its record backs
 #   brain watch [install|uninstall]     start what the cockpit asks for: leave it open and
 #                                       its Run, Approve, Draft, Install and Evolve buttons
 #                                       open a Terminal window and run brain for you, and
@@ -197,7 +204,7 @@ pick() { # question item... -> the chosen item (menu on stderr, answer on stdout
 # anything — and removing the folder removes all of it. A name two roots both define is
 # an error (app_conflicts), never an override. ui/brain.mjs sysRoots is the same rule.
 # sys_roots, in_roots, playbook_dir and app_field live in system/skills/brain-mem/lib.sh.
-BRAIN_VERSION=2
+BRAIN_VERSION=3
 # The views an app's ui/app.json may name for a project tab. ui/brain.mjs APP_VIEWS is the same
 # list (ui/test.mjs checks they agree): the cockpit renders them, the app picks which.
 APP_VIEWS="article design brandkit"
@@ -2400,6 +2407,123 @@ oneshot_busy() { # ERE of sandbox names -> 0 while one of them is running or jus
   return "$busy"
 }
 
+# ---------- a project's end: archive, restore, delete -------------------------
+# A finished project stays in every list for good unless it can leave. Archived, its
+# record moves to memory/projects/.archive/<name>/ — inside projects/, so it is as local
+# and as untracked as it was, and a dot folder, so no list of projects sees it. Deleted,
+# the record is gone; the knowledge it left is the human's choice, and its code folder is
+# never touched. Either way its sandboxes go: nothing would ever start them again.
+project_archive_dir() { echo "$MEM/projects/.archive"; }
+project_busy() { # pdir -> true while a run holds it
+  compgen -G "$1/phases/*.running" >/dev/null || compgen -G "$1/.*-running" >/dev/null \
+    || { [ -f "$1/.launching" ] && [ -z "$(find "$1/.launching" -mmin +1 2>/dev/null)" ]; } \
+    || { [ -f "$1/.waiting" ] && kill -0 "$(cat "$1/.waiting" 2>/dev/null)" 2>/dev/null; }
+}
+project_sandboxes_drop() { # project -> its sandbox on every engine, removed
+  local e s have; have=" $(sbx ls 2>/dev/null | awk 'NR > 1 { print $1 }' | tr '\n' ' ') "
+  for e in $(engines_known); do
+    s="$1-$e"
+    case "$have" in *" $s "*) sbx rm --force "$s" >/dev/null 2>&1 && info "removed the sandbox $s" || info "could not remove the sandbox $s — sbx rm --force $s" ;; esac
+  done
+}
+project_pages() { # project -> the knowledge pages only its record backs: every projects/ citation is its own
+  local f cites
+  for f in "$MEM"/knowledge/*.md; do
+    [ -f "$f" ] || continue
+    cites="$(grep -oE 'projects/[A-Za-z0-9._-]+' "$f" | sed 's/[.]*$//' | sort -u || true)"
+    [ "$cites" = "projects/$1" ] && basename "$f"
+  done; return 0
+}
+project_dir_of() { # name -> its folder, active or archived; non-zero when neither
+  [[ "$1" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || return 1
+  if [ -f "$MEM/projects/$1/project.env" ]; then echo "$MEM/projects/$1"
+  elif [ -f "$(project_archive_dir)/$1/project.env" ]; then echo "$(project_archive_dir)/$1"
+  else return 1; fi
+}
+# What `brain project` and the Studio both end up in. Each prints one line, what it did
+# or why it will not, and returns non-zero on a refusal instead of dying: the watcher has
+# to survive a request it refuses. Anything said on the way goes to stderr.
+project_archive() { # name
+  local d="$MEM/projects/$1" dest
+  [[ "$1" =~ ^[a-z0-9][a-z0-9._-]*$ ]] && [ -f "$d/project.env" ] || { echo "no project '$1'"; return 1; }
+  project_busy "$d" && { echo "'$1' is running — wait for it, or stop it first"; return 1; }
+  dest="$(project_archive_dir)/$1"
+  [ -e "$dest" ] && dest="$dest-$(date +%F-%H%M%S)"
+  mkdir -p "$(project_archive_dir)"; rm -f "$d"/.*-request "$d"/.launching
+  mv "$d" "$dest" || { echo "could not move '$1' into the archive"; return 1; }
+  project_sandboxes_drop "$1" >&2
+  echo "archived '$1' as $(basename "$dest") — brain project restore $(basename "$dest") brings it back"
+}
+project_restore() { # archived-name
+  local d; d="$(project_archive_dir)/$1"
+  local name; name="$(echo "$1" | sed -E 's/-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}$//')"
+  [[ "$1" =~ ^[a-z0-9][a-z0-9._-]*$ ]] && [ -f "$d/project.env" ] || { echo "no archived project '$1'"; return 1; }
+  [ -e "$MEM/projects/$name" ] && { echo "a project '$name' exists already — archive or delete it first"; return 1; }
+  mv "$d" "$MEM/projects/$name" || { echo "could not restore '$1'"; return 1; }
+  echo "restored '$name'"
+}
+project_delete() { # name keep|all -> the record gone; with all, the knowledge only it backs too
+  local d name kind app dir page pages=""
+  d="$(project_dir_of "$1")" || { echo "no project '$1', active or archived"; return 1; }
+  project_busy "$d" && { echo "'$1' is running — wait for it, or stop it first"; return 1; }
+  name="$1"; case "$d" in "$(project_archive_dir)"/*) name="$(echo "$1" | sed -E 's/-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{6}$//')" ;; esac
+  kind="$(awk -F= '$1 == "KIND" { print $2 }' "$d/project.env")"
+  dir="$(awk -F= '$1 == "PROJECT_DIR" { sub(/^[^=]*=/, ""); print }' "$d/project.env" | tr -d '"')"
+  # Read while the record is still there: with it gone, nothing says which pages were its.
+  # (An archived one whose name an active project took since: those pages are that one's.)
+  if [ "${2:-keep}" = all ] && { [ "$d" = "$MEM/projects/$name" ] || [ ! -e "$MEM/projects/$name" ]; }; then
+    for page in $(project_pages "$name"); do rm -f "$MEM/knowledge/$page"; index_drop "$page"; pages="$pages $page"; done
+  fi
+  rm -rf "$d" || { echo "could not delete '$1'"; return 1; }
+  project_sandboxes_drop "$name" >&2
+  # The app a project of a kind belongs to may have made things of its own for it (the
+  # idea app's scratch folder): told last, when the record is gone for certain.
+  if [ -n "$kind" ] && app="$(kind_app "$kind")" && app_cli "$app" && declare -F "${app}_project_deleted" >/dev/null; then
+    "${app}_project_deleted" "$name" "$dir" "${2:-keep}" >&2 || true
+  fi
+  [ -d "$dir" ] || dir=""
+  [ -z "$pages" ] || commit_memory "delete $name and the knowledge only it backed"
+  echo "deleted '$1'${pages:+ and$pages}${dir:+ — its code folder stays: $dir}"
+}
+
+cmd_project() {
+  local verb="${1:-}" name="${2:-}" out
+  case "$verb" in
+    list) names_in "$(project_archive_dir)" 2>/dev/null | sed 's/^/archived  /' || true; return 0 ;;
+    archive|restore) [ -n "$name" ] || die "usage: brain project $verb <name>"
+      out="$("project_$verb" "$name")" || die "$out"; info "$out" ;;
+    rm) local mode=keep yes=""; shift 2 || die "usage: brain project rm <name> [--knowledge] [--yes]"
+      while [ $# -gt 0 ]; do case "$1" in --knowledge) mode=all ;; --yes) yes=1 ;; *) die "unknown option $1" ;; esac; shift; done
+      [ -n "$name" ] || die "usage: brain project rm <name> [--knowledge] [--yes]"
+      if [ -z "$yes" ]; then
+        interactive || die "deleting is for good: add --yes"
+        [ "$mode" = all ] && { out="$(project_pages "$name" | paste -sd' ' -)"; [ -z "$out" ] || info "--knowledge also deletes: $out"; }
+        [ "$(ask "type $name to delete it for good")" = "$name" ] || die "stopped — nothing changed"
+      fi
+      out="$(project_delete "$name" "$mode")" || die "$out"; info "$out" ;;
+    *) die "usage: brain project archive <name> | restore <name> | rm <name> [--knowledge] [--yes] | list" ;;
+  esac
+}
+
+# One tick of the Studio's Archive, Restore and Delete: a .end-request in the project's
+# folder, active or archived, holding one of: archive | restore | delete keep | delete all.
+# A refusal is left beside it as .end-error for the page to show.
+watch_ends() {
+  local req d name verb mode out
+  for req in "$MEM"/projects/*/.end-request "$(project_archive_dir)"/*/.end-request; do
+    [ -f "$req" ] || continue
+    d="$(dirname "$req")"; name="$(basename "$d")"
+    read -r verb mode < "$req" || true; rm -f "$req" "$d/.end-error"
+    case "$verb ${mode:-}" in
+      "archive "|"restore "|"delete keep"|"delete all") ;;
+      *) echo "'$verb ${mode:-}' is not something a project ends with" > "$d/.end-error"; continue ;;
+    esac
+    if [ "$verb" = delete ]; then out="$(project_delete "$name" "$mode")"; else out="$("project_$verb" "$name")"; fi \
+      || { [ ! -d "$d" ] || echo "$out" > "$d/.end-error"; }
+    info "$out"
+  done
+}
+
 # One tick of the cockpit's run requests: start what fits under the cap, leave the rest
 # in place. QUEUED says how many waited, for the one line the loop prints about it.
 QUEUED=0
@@ -2562,6 +2686,7 @@ cmd_watch() {
       compgen -G "$dir/phases/*.running" >/dev/null && sweep_stale "$(basename "$dir")" "${dir%/}"
     done
     watch_new
+    watch_ends
     watch_runs
     watch_apps
     # Under the Docker driver an agent's `docker compose` is a request; this runs it, checked.
@@ -3135,12 +3260,25 @@ app_remove() { # name
   fi
 }
 
+index_drop() { # page.md -> its line gone from index.md, and a "### " heading left with no page under it
+  local idx="$MEM/index.md"
+  [ -f "$idx" ] || return 0
+  awk -v n="(knowledge/$1)" '
+    !/^[[:space:]]*<!--/ && index($0, n) { next }
+    /^### / { h = $0; gap = ""; next }
+    h != "" && !NF { gap = gap "\n"; next }
+    h != "" && /^#/ { h = ""; gap = "" }
+    h != "" { print h; printf "%s", gap; h = ""; gap = "" }
+    { print }
+  ' "$idx" > "$idx.tmp" && mv "$idx.tmp" "$idx"
+}
+
 # Uninstalling an app hides the pages tagged with it (no scope names the tag any more) and
 # deletes nothing. Forgetting it, asked for by name, moves the pages that are only its out of
 # knowledge/ and index.md into archive/, still tracked and still there to read. A page another
 # tag still reads stays where it is.
 app_forget() { # name
-  local name="${1:-}" f base dest tags moved="" kept="" idx="$MEM/index.md"
+  local name="${1:-}" f base dest tags moved="" kept=""
   [ -n "$name" ] || die "usage: brain app forget <name>"
   [ -f "$SYS/apps/$name/app.conf" ] && die "'$name' is installed and its projects read those pages — brain app remove $name first"
   for f in "$MEM"/knowledge/*.md; do
@@ -3152,15 +3290,7 @@ app_forget() { # name
     mkdir -p "$MEM/archive/knowledge"; dest="$MEM/archive/knowledge/$base"
     [ -e "$dest" ] && dest="$MEM/archive/knowledge/${base%.md}-$(date +%F-%H%M%S).md"
     mv "$f" "$dest"; moved="$moved $base"
-    # Its index line, then a "### " heading left with no page under it.
-    [ -f "$idx" ] && awk -v n="(knowledge/$base)" '
-      !/^[[:space:]]*<!--/ && index($0, n) { next }
-      /^### / { h = $0; gap = ""; next }
-      h != "" && !NF { gap = gap "\n"; next }
-      h != "" && /^#/ { h = ""; gap = "" }
-      h != "" { print h; printf "%s", gap; h = ""; gap = "" }
-      { print }
-    ' "$idx" > "$idx.tmp" && mv "$idx.tmp" "$idx"
+    index_drop "$base"
   done
   if [ -n "$moved" ]; then info "moved to memory/archive/knowledge/:$moved"; else info "no page is tagged '$name' alone"; fi
   [ -z "$kept" ] || info "kept, another tag still reads them (take '$name' out of their tags: line and index.md heading by hand):$kept"
@@ -3466,6 +3596,7 @@ cmd_test() {
   approve)     shift; cmd_approve "$@" ;;
   reject)      shift; cmd_reject "$@" ;;
   reopen)      shift; cmd_reopen "$@" ;;
+  project)     shift; cmd_project "$@" ;;
   watch)       shift; cmd_watch "$@" ;;
   *) if app_cli "${1:-}"; then
        a="$1"; shift; declare -F "cmd_$a" >/dev/null || die "the $a app's cli.sh defines no cmd_$a"; "cmd_$a" "$@"

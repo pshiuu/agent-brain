@@ -964,6 +964,28 @@ it('archives a client, restores it, and deletes one for good, never under an unf
   b.deleteClient({ archived: second, confirm: 'oldco' })
   assert.deepEqual(b.archivedClients(), [])
 })
+it('stages a project\'s archive, restore and delete for brain watch, and lists the archive', () => {
+  const pdir = join(FIX, 'memory/projects/endme'), adir = join(FIX, 'memory/projects/.archive/gone-2026-01-02-030405')
+  mkdirSync(pdir, { recursive: true }); mkdirSync(adir, { recursive: true })
+  writeFileSync(join(pdir, 'project.env'), 'PLAYBOOK=seo2\nCREATED=2026-01-01\n')
+  writeFileSync(join(adir, 'project.env'), 'KIND=idea\nCREATED=2026-01-01\n')
+  writeFileSync(join(FIX, 'memory/knowledge/endme-only.md'), '# Only\ntags: shared\nx\n\n## Sources\n- projects/endme/phases/a.md\n')
+  try {
+    assert.deepEqual(b.projects().find(p => p.name === 'endme').ownKnowledge, ['endme-only'], 'the pages only its record backs')
+    assert.ok(!b.projects().some(p => p.name === '.archive'), 'the archive is not a project')
+    assert.deepEqual(b.archivedProjects().map(a => [a.name, a.slug, a.kind]), [['gone-2026-01-02-030405', 'gone', 'idea']])
+    throws(() => b.requestProjectEnd({ project: 'endme', action: 'restore' }), /not something a project can do/)
+    throws(() => b.requestProjectEnd({ project: '../x', action: 'archive' }), /no project/)
+    throws(() => b.requestProjectEnd({ project: 'endme', action: 'delete-all', confirm: 'endm' }), /confirm with the project's name/)
+    b.requestProjectEnd({ project: 'endme', action: 'delete-all', confirm: 'endme' })
+    assert.equal(readFileSync(join(pdir, '.end-request'), 'utf8'), 'delete all\n')
+    assert.equal(b.projects().find(p => p.name === 'endme').ending, 'delete all')
+    throws(() => b.requestProjectEnd({ project: 'endme', action: 'archive' }), /already asked for/)
+    b.requestProjectEnd({ archived: 'gone-2026-01-02-030405', action: 'restore' })
+    assert.equal(readFileSync(join(adir, '.end-request'), 'utf8'), 'restore\n')
+    throws(() => b.requestProjectEnd({ archived: 'endme', action: 'restore' }), /no archived project/)
+  } finally { rmSync(pdir, { recursive: true }); rmSync(join(FIX, 'memory/projects/.archive'), { recursive: true }); rmSync(join(FIX, 'memory/knowledge/endme-only.md')) }
+})
 it('turns the form into a brief: typed answers under their labels, staged files listed, nothing written on a bad answer', () => {
   const st = join(FIX, 'memory/.new/battery-guide')
   const up = b.addSource({ staged: 'battery-guide', name: 'notes.docx', data: Buffer.from('x').toString('base64') })

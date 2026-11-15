@@ -564,6 +564,46 @@ export function deleteClient ({ client, archived, confirm }) {
   return { deleted: archived || slug }
 }
 
+/* ---------- a project's end: archive, restore, delete ----------
+   bin/brain does all three (project_archive, project_restore, project_delete): they take
+   sandboxes with them, which only the host can. The Studio leaves `.end-request` in the
+   project's folder, active or in memory/projects/.archive/, and `brain watch` acts on it. */
+const PROJECT_ARCHIVE = () => join(MEM, 'projects', '.archive')
+const ENDABLE = /^[a-z0-9][a-z0-9._-]{0,80}$/
+const ARCHIVE_STAMP = /-\d{4}-\d{2}-\d{2}-\d{6}$/
+/** What a project's page says about its end: a request waiting, or why the last one was refused. */
+const endState = dir => ({
+  ending: (read(join(dir, '.end-request')) || '').trim() || null,
+  endError: (read(join(dir, '.end-error')) || '').trim() || null
+})
+/** The knowledge pages only this project's record backs — what "delete everything" takes
+ *  with it (bin/brain project_pages). */
+const ownKnowledge = (name, pages) => pages.filter(k => k.cites.length === 1 && k.cites[0] === name).map(k => k.name)
+
+export function archivedProjects () {
+  const pages = knowledge()
+  return dirs(PROJECT_ARCHIVE()).filter(n => existsSync(join(PROJECT_ARCHIVE(), n, 'project.env'))).map(name => {
+    const dir = join(PROJECT_ARCHIVE(), name), env = parseEnv(read(join(dir, 'project.env'))), slug = name.replace(ARCHIVE_STAMP, '')
+    return { name, slug, playbook: env.PLAYBOOK || null, kind: env.KIND || null, created: env.CREATED || null, archived: mtime(dir) || null,
+      ownKnowledge: existsSync(join(MEM, 'projects', slug)) ? [] : ownKnowledge(slug, pages), ...endState(dir) }
+  })
+}
+
+/** `action`: archive (an active project), restore (an archived one), delete-keep or
+ *  delete-all (either; `confirm` is its name, and all also deletes the knowledge only it backs). */
+export function requestProjectEnd ({ project, archived, action, confirm }) {
+  const name = String(archived || project || '')
+  const dir = join(archived ? PROJECT_ARCHIVE() : join(MEM, 'projects'), name)
+  if (!ENDABLE.test(name) || !existsSync(join(dir, 'project.env'))) throw new HttpError(404, `no ${archived ? 'archived ' : ''}project '${name}'`)
+  const line = { archive: !archived && 'archive', restore: archived && 'restore', 'delete-keep': 'delete keep', 'delete-all': 'delete all' }[action]
+  if (!line) throw new HttpError(400, `'${action}' is not something ${archived ? 'an archived' : 'a'} project can do`)
+  if (line.startsWith('delete') && confirm !== name) throw new HttpError(400, `confirm with the project's name: ${name}`)
+  if (existsSync(join(dir, '.end-request'))) throw new HttpError(409, 'already asked for — it happens within seconds while brain watch runs')
+  rmSync(join(dir, '.end-error'), { force: true })
+  writeAtomic(join(dir, '.end-request'), line + '\n')
+  return { requested: line, watching: watching() }
+}
+
 // ---------- state ------------------------------------------------------------
 
 export function playbooks () {
@@ -952,7 +992,8 @@ export function projects () {
       // Waiting out a subscription limit (bin/brain wait_limit): which engine, and until when.
       limit: (([engine, until]) => +until * 1000 > Date.now() ? { engine, until: +until * 1000 } : null)((read(join(pdir, '.limit')) || '').trim().split(/\s+/)),
       qa: qaReports(name), mem: `memory/projects/${name}`,
-      memory: projectMemory(name, pages, log, props)
+      memory: projectMemory(name, pages, log, props),
+      ownKnowledge: ownKnowledge(name, pages), ...endState(pdir)
     }
   })
 }
@@ -2375,6 +2416,7 @@ const workRoot = env => {
 }
 /** The projects of an app's kind, with the run markers its cli.sh leaves in memory/. */
 function kindProjects (app, kind) {
+  const pages = knowledge()
   return dirs(join(MEM, 'projects')).map(name => ({ name, env: parseEnv(read(join(MEM, 'projects', name, 'project.env'))) }))
     .filter(x => x.env.KIND === kind).map(({ name, env }) => {
       const pdir = join(MEM, 'projects', name), root = workRoot(env)
@@ -2383,6 +2425,7 @@ function kindProjects (app, kind) {
         running: (read(join(pdir, `.${app}-running`)) || '').trim() || null,
         request: read(join(pdir, `.${app}-request`)) || read(join(pdir, `.${app}-request.taken`)) || null,
         launching: existsSync(join(pdir, '.launching')),
+        ownKnowledge: ownKnowledge(name, pages), ...endState(pdir),
         staged: ls(join(pdir, 'inbox')).filter(d => d.isFile()).map(d => d.name),
         edits: ls(pdir).filter(d => d.isFile() && d.name.endsWith('.staged')).map(d => d.name.replace(/\.staged$/, ''))
       }
@@ -2536,7 +2579,7 @@ export function knowledgeGraph () {
 
 export function state () {
   return {
-    playbooks: playbooks(), apps: apps(), store: appStore(), base: baseUpdate(), engines: engines(), usage: usage(), clientsOn: clientsOn(), roles: roles(), skills: skills(), sandbox: sandbox(), projects: projects(), clients: clients(), archivedClients: archivedClients(), knowledge: knowledge(), proposals: proposals(read(join(MEM, 'proposals.md'))), examples: examples(), sources: sources(), lint: lint(), models: models(), maxFixLoops: MAX_FIX_LOOPS, hostBrain: HOST_BRAIN, hostDev: HOST_DEV, watching: watching(), evolvePending: existsSync(join(MEM, '.evolve-request')),
+    playbooks: playbooks(), apps: apps(), store: appStore(), base: baseUpdate(), engines: engines(), usage: usage(), clientsOn: clientsOn(), roles: roles(), skills: skills(), sandbox: sandbox(), projects: projects(), archivedProjects: archivedProjects(), clients: clients(), archivedClients: archivedClients(), knowledge: knowledge(), proposals: proposals(read(join(MEM, 'proposals.md'))), examples: examples(), sources: sources(), lint: lint(), models: models(), maxFixLoops: MAX_FIX_LOOPS, hostBrain: HOST_BRAIN, hostDev: HOST_DEV, watching: watching(), evolvePending: existsSync(join(MEM, '.evolve-request')),
     maxParallel: Number(setting('BRAIN_MAX_PARALLEL', 3)) || 0,
     pending: { new: pendingProjects(), drafts: drafts(), draft: (read(join(MEM, '.draft-request')) || '').trim() || null, commit: existsSync(join(MEM, '.commit-request')) }
   }

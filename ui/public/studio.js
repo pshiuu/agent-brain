@@ -228,7 +228,8 @@ function projectsView (areaSlug = '') {
   const title = area || 'All projects'
   return frame([[title, '', area ? 'folder' : 'files']], [newButton(area)],
     head(title, `${all.length} in all${filtered ? `, ${ps.length} shown` : ''}.`), watchingNote(),
-    card(title, '', filters, projectTable(ps, { none: filtered ? 'Nothing matches these filters.' : 'No projects yet.' })))
+    card(title, '', filters, projectTable(ps, { none: filtered ? 'Nothing matches these filters.' : 'No projects yet.' })),
+    archivedCard(a => a.playbook && (!area || areaOf(a.playbook) === area)))
 }
 
 /* ---------- New project ---------- */
@@ -408,7 +409,7 @@ function projectView (name, tab = '') {
   const stuck = st.key === 'stuck' ? note('err', 'warning-circle', 'A step failed its checks more often than allowed. Try again runs it once more. If it stops again, Admin shows what went wrong.') : null
   const body = tab === 'review' ? reviewPanel(p, p.next)
     : own.some(t => t.id === tab && t.view === 'article') ? copyPanel(p)
-      : tab === 'brief' ? briefPanel(p) : progressPanel(p)
+      : tab === 'brief' ? briefPanel(p) : frag(progressPanel(p), endCard(p))
   return frame([areaCrumb(p), ...(p.client ? [[clientName(p.client), `#/client/${encodeURIComponent(p.client)}`]] : []), [titleOf(p)]], [newButton(areaOf(p.playbook))],
     h, stepper(p), watchingNote(), stuck, seg, body)
 }
@@ -601,6 +602,62 @@ function progressPanel (p) {
     table([['#', 'idx'], ['Step', ''], ['Status', ''], ['Fix rounds', 'hide-sm']], rows, ''))
 }
 
+/* ---------- a project's end: archive, restore, delete ----------
+   The Studio only asks (/api/project-end leaves .end-request); brain watch does it, since
+   the project's sandboxes go with it. Shared with the apps through the kit, so an app's
+   own pages (an idea, a Frappe task) end a project the same way. */
+const endAsk = async (body, after) => {
+  try { await api('/api/project-end', { method: 'POST', body }); toast(S.watching ? 'Done in a moment.' : 'Saved. It happens as soon as the helper runs.'); await refresh(); after() }
+  catch (e) { toast(e.message) }
+}
+/** The two ways to delete, asked at the moment of deleting. `t` is { project } or { archived }. */
+function deleteChooser (t, own, after, folder = 'The code folder stays either way.') {
+  const name = t.archived || t.project, box = $('div', 'pad'), bar = $('div', 'bar')
+  const go = (cls, ico, label, action) => { const b = btn(cls, ico, label); b.onclick = () => { b.disabled = true; endAsk({ ...t, action, confirm: name }, after) }; return b }
+  const cancel = btn('quiet', 'x', 'Cancel'); cancel.onclick = () => { box.hidden = true }
+  bar.append(go('', 'trash', 'Delete, keep what it taught', 'delete-keep'), go('', 'trash', own.length ? `Delete everything, and ${own.length} knowledge page${own.length > 1 ? 's' : ''}` : 'Delete everything', 'delete-all'), cancel)
+  box.append($('p', '', own.length
+    ? `Deleting is for good. What this project taught the agents can stay for the next one, or go with it: ${own.join(', ')}. ${folder}`
+    : `Deleting is for good. No knowledge page rests on this project alone. ${folder}`), bar)
+  box.hidden = true
+  return box
+}
+function endCard (p, back = '#/articles', folder) {
+  if (p.ending) return note('', 'clock', p.ending === 'archive' ? 'Being archived.' : 'Being deleted.')
+  const bar = $('div', 'bar'), arch = btn('', 'archive', 'Archive'), del = btn('quiet', 'trash', 'Delete')
+  const after = () => { location.hash = back; render() }
+  const chooser = deleteChooser({ project: p.name }, p.ownKnowledge || [], after, folder)
+  arch.onclick = () => { arch.disabled = true; endAsk({ project: p.name, action: 'archive' }, after) }
+  del.onclick = () => { chooser.hidden = !chooser.hidden }
+  bar.append(arch, del)
+  return card('Archive or delete', 'Archived, it leaves every list and its record is kept; it can be brought back. Deleted, the record is gone.', bar,
+    p.endError ? note('err', 'warning-circle', p.endError) : null, chooser)
+}
+/** The archive, folded away under a list. `mine` picks the ones a page is about. */
+function archivedCard (mine = () => true) {
+  const list = (S.archivedProjects || []).filter(mine)
+  if (!list.length) return null
+  const d = $('details', 'fold'); d.append($('summary', '', `Archived (${list.length})`))
+  const rows = list.flatMap(a => {
+    const r = $('tr'), more = $('tr'), cell = $('td'), acts = $('div', 'bar'); cell.colSpan = 3
+    const chooser = deleteChooser({ archived: a.name }, a.ownKnowledge || [], render)
+    cell.append(chooser); more.append(cell); more.hidden = true
+    if (a.ending) acts.append($('span', 'dim', a.ending === 'restore' ? 'Being restored' : 'Being deleted'))
+    else {
+      const back = btn('', 'arrow-counter-clockwise', 'Restore'), del = btn('quiet', 'trash', 'Delete')
+      back.onclick = () => { back.disabled = true; endAsk({ archived: a.name, action: 'restore' }, render) }
+      del.onclick = () => { more.hidden = !more.hidden; chooser.hidden = more.hidden }
+      acts.append(back, del)
+    }
+    const nameCell = td('', $('span', 't', human(a.slug))); if (a.endError) nameCell.append($('span', 'k', a.endError))
+    r.append(nameCell, td('dim hide-sm', a.playbook ? typeOf(a.playbook) : human(a.kind || '')), td('', acts))
+    r.style.cursor = 'default'
+    return [r, more]
+  })
+  d.append(table([['Project', ''], ['Type', 'hide-sm'], ['', '']], rows, ''))
+  return card('Archived', 'Out of every list, record kept. Restore one to work on it again.', null, pad(d))
+}
+
 function briefPanel (p) {
   const b = $('div'); b.append($('div', 'skel'), $('div', 'skel'))
   fileText(`${p.mem}/brief.md`).then(t => { b.textContent = ''; b.append(md(t.replace(/^# Brief\s*/, ''))) })
@@ -777,7 +834,9 @@ function kit (app) {
     frame, head, card, pad, table, td, rowLink, empty, toast, note, keep, link, withIcon, btn, tagOf, watchingNote, human, ago,
     $, icon, md, graphView, readB64,
     // The rest of the cockpit, for an app that builds on the Studio's own pages (clients).
-    api, upload, inputsForm, projectTable, sorted, status, titleOf, clientName, newButton
+    api, upload, inputsForm, projectTable, sorted, status, titleOf, clientName, newButton,
+    // A project's end, the same on an app's own pages: endCard(project, backHref, whatHappensToItsFolder), archivedCard(filter).
+    endCard, archivedCard
   }
 }
 async function loadApps () {
