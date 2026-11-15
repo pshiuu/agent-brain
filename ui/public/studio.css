@@ -152,7 +152,7 @@ details.fold[open] { background: var(--surface); }
 details.fold[open] > summary { border-bottom: 1px solid var(--line-2); margin-bottom: 12px; }
 details.fold > .fields { padding-bottom: 14px; }
 .add { display: flex; gap: 8px; }
-.add input { width: 220px; min-height: 34px; }
+.add input { width: 220px; min-width: 0; flex: 0 1 220px; min-height: 34px; }
 
 /* ---- notes, toast, loading, empty ---- */
 .note { display: flex; gap: 10px; align-items: flex-start; border-radius: var(--r-c); padding: 11px 14px; background: var(--sunk); color: var(--ink-2); font-size: 13px; border: 1px solid var(--line-2); }
@@ -175,7 +175,7 @@ details.fold > .fields { padding-bottom: 14px; }
 .prose { max-width: 72ch; color: var(--ink-2); }
 .prose h2, .prose h3, .prose h4 { color: var(--ink); margin: 22px 0 6px; font-size: 15px; }
 .prose ul, .prose ol { padding-left: 20px; }
-.prose code { font-family: var(--mono); background: var(--sunk); padding: 1px 5px; border-radius: 4px; font-size: .88em; }
+.prose code { overflow-wrap: anywhere; font-family: var(--mono); background: var(--sunk); padding: 1px 5px; border-radius: 4px; font-size: .88em; }
 .prose pre { background: var(--sunk); padding: 12px 14px; border-radius: var(--r-c); overflow-x: auto; }
 .prose table { border-collapse: collapse; display: block; overflow-x: auto; margin: 12px 0; font-size: 13px; }
 .prose th, .prose td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
@@ -198,9 +198,8 @@ details.fold > .fields { padding-bottom: 14px; }
 pre.plain { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.55 var(--mono); background: var(--sunk); border: 1px solid var(--line-2); border-radius: var(--r-c); padding: 14px; max-height: 340px; overflow: auto; }
 .article-body.prose { max-width: none; border: 1px solid var(--line); border-radius: var(--r); padding: clamp(18px, 3vw, 36px); font-size: 15.5px; line-height: 1.7; }
 
-/* ---- phone: shared.css makes the sidebar a top bar; the client list and the way
-   to Admin do not fit in it ---- */
-@media (max-width: 900px) { .group.clients, .admin { display: none; } }
+/* ---- phone: shared.css makes the sidebar a drawer, with room for all of it ---- */
+@media (max-width: 900px) { .admin { min-height: 44px; padding: 0 10px; font-size: 15px; } }
 
 /* Academy */
 .gap { height: 10px; }
@@ -221,3 +220,22 @@ a.cite:hover { text-decoration-color: var(--ink); }
 
 .proposals .dim, .card .bar .dim { color: var(--muted); font-size: 12.5px; }
 .proposals summary, .card details > summary { cursor: pointer; color: var(--muted); }
+
+/* ---- phone: what sat side by side stacks, and nothing is narrower than a thumb ---- */
+@media (max-width: 640px) {
+  .body { padding: 20px 14px 56px; gap: 20px; }
+  .head h1 { font-size: 22px; }
+  .head > div { flex-basis: 100%; }
+  /* A card's action goes under its title instead of squeezing it into a column. */
+  .card > header { flex-wrap: wrap; padding: 14px 14px 12px; }
+  .card > header > div { flex-basis: 100%; }
+  .card > .pad { padding: 0 14px 14px; }
+  .card .grid th:first-child, .card .grid td:first-child { padding-left: 14px; }
+  .card .grid th:last-child, .card .grid td:last-child { padding-right: 14px; }
+  .strip { padding: 8px 10px 8px 14px; }
+  .bar > button, .bar > .btn { flex: 1 1 auto; }
+  .bar > select, .bar > input[type=text] { flex: 1 1 100%; min-width: 0; }
+}
+/* A proposal's target is a path: on a narrow screen it wraps instead of being cut in half. */
+@media (max-width: 640px) { .proposal .meta .chip { height: auto; min-height: 24px; padding: 3px 10px; white-space: normal; overflow-wrap: anywhere; line-height: 1.35; } }
+@media (max-width: 640px) { .stepper li { flex-basis: 84px; } .stepper { scrollbar-width: none; } }

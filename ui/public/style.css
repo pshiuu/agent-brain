@@ -258,7 +258,6 @@ a.pagelink.primary { background: var(--act); color: var(--act-ink); }
   .row.k2, .row.k3, .row.roles, a.row.phaserow, details.phase > summary { grid-template-columns: minmax(0, 1fr); gap: 4px; }
   a.row.phaserow .tag:nth-child(n+4) { justify-self: start; text-align: left; }
 }
-@media (max-width: 900px) { .foot { display: none; } }
 
 /* ---------- the app store ---------- */
 .app-tile { --h: 220; display: inline-grid; place-items: center; flex: none; border-radius: 22%;

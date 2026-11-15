@@ -13,7 +13,13 @@
 </head>
 <body>
 <div class="app">
-  <aside class="side">
+  <header class="topbar">
+    <button id="menu" class="quiet" aria-label="Menu" aria-controls="side" aria-expanded="false"><i class="ph ph-list" aria-hidden="true"></i></button>
+    <a class="ws" href="#/"><span class="logo" aria-hidden="true"><i class="ph ph-gear-six"></i></span><b>Admin</b></a>
+    <span id="where" class="where"></span>
+  </header>
+  <div id="scrim" class="scrim" hidden></div>
+  <aside class="side" id="side">
     <a class="ws" href="#/" title="The terminal runs phases. This edits and watches."><span class="logo" aria-hidden="true"><i class="ph ph-gear-six"></i></span><b>Admin</b></a>
     <nav id="nav" aria-label="Admin"></nav>
     <footer class="foot">

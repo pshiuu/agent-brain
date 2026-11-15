@@ -144,18 +144,39 @@ input[type=text]:focus, input[type=number]:focus, input[type=email]:focus, input
 input[type=file] { font: 13px var(--sans); color: var(--muted); }
 input[type=file]::file-selector-button { font: 500 13px var(--sans); color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-c); padding: 7px 12px; margin-right: 10px; cursor: pointer; }
 
-/* ---- phone: the sidebar becomes a top bar ---- */
+/* ---- phone and tablet: a top bar with a menu button, the sidebar a drawer behind it ---- */
+.topbar, .scrim { display: none; }
 @media (max-width: 900px) {
-  .app { grid-template-columns: minmax(0, 1fr); }
-  .side { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 12px 4px; overflow: visible; }
-  .search { order: 3; flex: 1 1 100%; }
-  #nav { order: 2; flex-direction: row; gap: 2px; overflow-x: auto; flex: 1 1 0; min-width: 0; }
-  .group { flex-direction: row; gap: 2px; }
-  .group > span { display: none; }
-  .nav-item { white-space: nowrap; }
-  #view { margin: 8px; min-height: 0; }
-  .theme { order: 2; }
-  .theme .label span { display: none; }
+  .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
+  .topbar { display: flex; align-items: center; gap: 4px; position: sticky; top: 0; z-index: 20; height: 52px; padding: 0 8px; padding-top: env(safe-area-inset-top, 0px); box-sizing: content-box; background: var(--ground); }
+  .topbar #menu { width: 44px; height: 44px; padding: 0; color: var(--ink); }
+  .topbar #menu .ph { font-size: 22px; }
+  .topbar .where { margin-left: auto; padding-right: 8px; color: var(--muted); font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .side { position: fixed; inset: 0 auto 0 0; z-index: 40; width: min(320px, 86vw); height: 100dvh; padding: calc(60px + env(safe-area-inset-top, 0px)) 14px calc(16px + env(safe-area-inset-bottom, 0px));
+    background: var(--ground); border-right: 1px solid var(--line); box-shadow: var(--shadow-up);
+    transform: translateX(-102%); visibility: hidden; transition: transform .24s var(--ease), visibility 0s .24s; overscroll-behavior: contain; }
+  /* The brand is in the top bar, which stays above the drawer so the button that opened it closes it. */
+  .side > .ws { display: none; }
+  .menu-open .side { transform: none; visibility: visible; transition: transform .24s var(--ease); }
+  .menu-open .topbar { z-index: 50; background: transparent; }
+  .menu-open .topbar .where { visibility: hidden; }
+  .scrim { display: block; position: fixed; inset: 0; z-index: 30; background: rgba(0, 0, 0, .38); animation: in .2s both; }
+  body.menu-open { overflow: hidden; }
+  /* Fingers, not a pointer: every row of the menu is a full-height target. */
+  .nav-item { min-height: 44px; padding: 0 10px; font-size: 15px; gap: 12px; }
+  .nav-item .ph { font-size: 19px; }
+  .group > span { padding: 0 10px 6px; }
+  .search { height: 44px; }
+  .theme { min-height: 44px; padding: 0 10px; font-size: 15px; }
+  #view { margin: 0 8px 8px; min-height: calc(100dvh - 60px); }
+  /* iOS zooms the page into any field whose text is under 16px. */
+  input[type=text], input[type=number], input[type=email], input[type=password], input[type=search], select, textarea, .search input { font-size: 16px; }
+}
+/* Touch anywhere, phone or tablet: controls tall enough to hit. */
+@media (pointer: coarse) {
+  .btn, button { min-height: 40px; }
+  button.quiet { min-height: 36px; }
+  select.chip, .chip { min-height: 34px; }
 }
 
 /* ---------- graph (graphView in shared.js) ---------- */

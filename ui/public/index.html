@@ -13,7 +13,13 @@
 </head>
 <body>
 <div class="app">
-  <aside class="side">
+  <header class="topbar">
+    <button id="menu" class="quiet" aria-label="Menu" aria-controls="side" aria-expanded="false"><i class="ph ph-list" aria-hidden="true"></i></button>
+    <a class="ws" href="#/"><span class="logo" aria-hidden="true"><i class="ph ph-pen-nib"></i></span><b>Studio</b></a>
+    <span id="where" class="where"></span>
+  </header>
+  <div id="scrim" class="scrim" hidden></div>
+  <aside class="side" id="side">
     <a class="ws" href="#/"><span class="logo" aria-hidden="true"><i class="ph ph-pen-nib"></i></span><b>Studio</b></a>
     <label class="search"><i class="ph ph-magnifying-glass" aria-hidden="true"></i><input id="q" type="search" placeholder="Search projects" aria-label="Search projects" autocomplete="off"></label>
     <nav id="nav" aria-label="Studio"></nav>

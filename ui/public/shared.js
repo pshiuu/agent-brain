@@ -8,6 +8,29 @@ const frag = (...n) => { const f = document.createDocumentFragment(); for (const
    runs before the first paint, and a reload never flashes the other theme first. */
 const THEME_KEY = 'brain-theme'
 try { const t = localStorage.getItem(THEME_KEY); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t } catch {}
+/* The phone menu: under 900px the sidebar is a drawer behind the top bar's button. It
+   closes on anything that means "I chose": a link in it, a new page, Escape, the scrim. */
+addEventListener('DOMContentLoaded', () => {
+  const btn = document.getElementById('menu'), side = document.getElementById('side'), scrim = document.getElementById('scrim')
+  if (!btn || !side) return
+  const set = open => {
+    document.body.classList.toggle('menu-open', open)
+    btn.setAttribute('aria-expanded', String(open)); scrim.hidden = !open
+    btn.firstElementChild.className = `ph ph-${open ? 'x' : 'list'}`
+    if (open) (side.querySelector('[aria-current="page"]') || side.querySelector('a'))?.focus({ preventScroll: true })
+  }
+  btn.onclick = () => set(!document.body.classList.contains('menu-open'))
+  scrim.onclick = () => set(false)
+  side.addEventListener('click', e => { if (e.target.closest('a')) set(false) })
+  addEventListener('hashchange', () => set(false))
+  addEventListener('keydown', e => { if (e.key === 'Escape' && document.body.classList.contains('menu-open')) { set(false); btn.focus() } })
+  // Searching is typing, not choosing: Enter is.
+  side.querySelector('input[type=search]')?.addEventListener('keydown', e => { if (e.key === 'Enter') set(false) })
+  matchMedia('(min-width: 901px)').addEventListener('change', e => { if (e.matches) set(false) })
+  // The top bar names the page you are on: the last crumb of whatever was just drawn.
+  const view = document.getElementById('view'), where = document.getElementById('where')
+  if (view && where) new MutationObserver(() => { where.textContent = view.querySelector('.crumbs .here')?.textContent || '' }).observe(view, { childList: true })
+})
 addEventListener('DOMContentLoaded', () => {
   const sw = document.getElementById('theme'), sys = matchMedia('(prefers-color-scheme: dark)')
   if (!sw) return
