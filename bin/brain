@@ -3115,12 +3115,15 @@ terminal() { # dir command -> a new Terminal window running it there, closed whe
   # `&& exit` ends the shell only when the command succeeded, and the watch below then
   # closes the window. A failure leaves it open, so the reason is still there to read.
   # Terminal's own "close when the shell exits" is not relied on: macOS ships it off.
-  # This brain's bin goes first on the window's PATH: every caller says `brain …`, and
-  # with two brains on one Mac the one on PATH may be the other, which has no such project.
+  # The window is told which brain it belongs to: every caller says `brain …`, and with two
+  # brains on one Mac the one on PATH may be the other, which has no such project. BRAIN is
+  # set as well as PATH because BRAIN wins in bin/brain, and a Terminal that a watcher
+  # started carries that watcher's BRAIN into every window — so osascript, which starts
+  # Terminal when it is not running, is given neither BRAIN nor DEV_DIR to pass on.
   local wid
-  wid="$(osascript 2>/dev/null <<OSA
+  wid="$(env -u BRAIN -u DEV_DIR osascript 2>/dev/null <<OSA
 tell application "Terminal"
-  set t to do script "export PATH=" & quoted form of "$BRAIN/bin" & ":\$PATH && cd " & quoted form of "$1" & " && $2 && exit"
+  set t to do script "export BRAIN=" & quoted form of "$BRAIN" & " DEV_DIR=" & quoted form of "$DEV" & " PATH=" & quoted form of "$BRAIN/bin" & ":\$PATH && cd " & quoted form of "$1" & " && $2 && exit"
   activate
   return id of front window
 end tell
