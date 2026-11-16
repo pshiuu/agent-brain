@@ -172,7 +172,21 @@ cmd_run() { # --name N -- args...
   [ -s "$ST/secrets/google" ] && env+=(-e GEMINI_API_KEY=brain-egress)
   [ "$(claude_auth)" = oauth ] && env+=(-e CLAUDE_CODE_OAUTH_TOKEN=brain-egress)
   local t=-i; [ -t 0 ] && [ -t 1 ] && t=-it
+  # The container outlives the agent (it is `sleep infinity`), so the last session to end
+  # stops it, as an sbx VM stops: /exit, a closed window and a killed run all come through
+  # here. A session is a file named for this process; one whose process is gone does not count.
+  mkdir -p "$ST/run"; : > "$ST/run/$name.$$"
+  trap "run_end '$name'" EXIT
   docker exec $t -u agent -w "$(label "$c" agent-brain.workspace)" "${env[@]}" "$c" "${cmd[@]}" "$@"
+}
+run_end() { # name -> stop the sandbox unless another session is in it
+  local f; rm -f "$ST/run/$1.$$"
+  for f in "$ST/run/$1".*; do
+    [ -e "$f" ] || continue
+    kill -0 "${f##*.}" 2>/dev/null && return 0
+    rm -f "$f"
+  done
+  cmd_stop "$1" 2>/dev/null || true
 }
 
 cmd_exec() { # N [--] cmd...
