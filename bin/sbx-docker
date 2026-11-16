@@ -199,7 +199,7 @@ cmd_run() { # --name N -- args...
   # stops it, as an sbx VM stops: /exit, a closed window and a killed run all come through
   # here. A session is a file named for this process; one whose process is gone does not count.
   mkdir -p "$ST/run"; : > "$ST/run/$name.$$"
-  trap "run_end '$name'" EXIT
+  trap "run_end '$name'" EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM   # a closed window is a HUP
   docker exec $t -u agent -w "$(label "$c" agent-brain.workspace)" "${env[@]}" "$c" "${cmd[@]}" "$@"
 }
 run_end() { # name -> stop the sandbox unless another session is in it
