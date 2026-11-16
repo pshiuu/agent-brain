@@ -87,7 +87,18 @@ Do, in this order. A session may stop after any step; the next one carries on th
      if it matters.
    Read it back to the human and change it until they say it is what they want. Then
    tell them how to build it: `brain idea build <name>`, or **Build it** in the Studio.
-7. **Before the session ends**, in this order: rewrite `idea.md`; update `## Stack` in
+   **A plan described in the chat is not a plan.** Only `plan.md` is: the Studio shows
+   it and the build reads it, and neither sees your messages. So never lay out "how I
+   would do it" and stop there. End that message with the one thing that stands between
+   it and the file, as a question the human can answer in a word: "Is this what you
+   want built? Say yes and I write `plan.md`; or tell me what to change." When they
+   answer yes, write it in that turn.
+7. **The human ends the session, not you.** This is a chat in their terminal: it stays
+   open, waiting for them, until they leave it. When a stretch of work is done, say in one
+   line what happens next and how to leave: "`/exit` closes this chat; everything is in
+   the note, and `brain idea <name>` carries on from it." Do the next step's writing
+   before you say that, not after.
+   **Before you tell them that**, in this order: rewrite `idea.md`; update `## Stack` in
    `brief.md`; and for every finding that would cost the next idea time to rediscover,
    write or update a knowledge page with `brain-mem page`, tagged with the stack word it
    is about and citing `projects/<this idea>/sources/<file>` or

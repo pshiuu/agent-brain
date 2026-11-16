@@ -818,7 +818,7 @@ function ideaWorkCard (i) {
   }
   talk.onclick = go('open'); build.onclick = go('build')
   const pick = $('div', 'bar'), acts = $('div', 'bar'); pick.append(engine, slot); acts.append(talk, build)
-  const sub = i.running ? `Open in a Terminal window on the Mac: ${i.running === 'build' ? 'the plan is being built' : 'being talked through'}.`
+  const sub = i.running ? `Open in a Terminal window on the Mac: ${i.running === 'build' ? 'the plan is being built' : 'being talked through'}. It is a chat: it waits for your answer there, ${hasPlan ? 'and' : 'writes the plan once you agree to one, and'} stays open until you type /exit.`
     : hasPlan ? 'There is a plan. Build it, with the same agent or another, or talk it through again to change it.'
       : 'Talking asks, researches and plans, and changes nothing in the folder. Building comes after, from the plan.'
   return card('Work on it', sub, null, pad(pick, acts))

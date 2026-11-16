@@ -2674,24 +2674,28 @@ ${what:+
 What the human brings to this session: $what
 }
 Start as your role says."
-  # What the folder looked like before: in a repo git says it exactly (and leaves out what
-  # the repo ignores, a build's output); elsewhere the marker's time has to do.
+  # What the session changed, asked two ways because neither sees everything. git status
+  # sees a deleted, added or committed file but nothing inside a folder the repo does not
+  # track yet (a repo before its first commit is one line, "?? app/"); the marker's time
+  # sees every file written since, there too, and git says which of those it ignores.
   local rc=0 touched="" before="" head_before="" is_git=""
   idea_changes() { git -C "$PROJECT_DIR" status --porcelain 2>/dev/null | grep -vE '^.. "?(refs|crawl|spikes)/|\.brain-idea$' | sort || true; }
   if [ "$mode" = think ] && git -C "$PROJECT_DIR" rev-parse --git-dir >/dev/null 2>&1; then
     is_git=1; before="$(idea_changes)"; head_before="$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || true)"
   fi
   launch "$engine" "$model" "$effort" "$prompt" "$role" "$resume" || rc=$?
-  if [ "$mode" != think ]; then :
-  elif [ -n "$is_git" ]; then
-    touched="$(comm -13 <(printf '%s\n' "$before") <(idea_changes) | grep . | head -20 || true)"
-    [ "$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || true)" = "$head_before" ] \
-      || touched="${touched:+$touched$'\n'}new commits since ${head_before:0:8}: git -C $PROJECT_DIR log ${head_before:0:8}..HEAD"
-  else
-    # ponytail: finds what was written or added, not what was deleted — there is no record to compare with.
-    touched="$(find "$PROJECT_DIR" -type f -newer "$PDIR/.idea-running" \
-      -not -path '*/refs/*' -not -path '*/crawl/*' -not -path '*/spikes/*' -not -path '*/node_modules/*' \
-      -not -name .brain-idea 2>/dev/null | sed "s|^$PROJECT_DIR/||" | head -20 || true)"
+  if [ "$mode" = think ]; then
+    # ponytail: outside a repo a deleted file is not found — there is no record to compare with.
+    touched="$(cd "$PROJECT_DIR" && find . -type f -newer "$PDIR/.idea-running" -not -path './.git/*' \
+      -not -path './refs/*' -not -path './crawl/*' -not -path './spikes/*' -not -path '*/node_modules/*' \
+      -not -name .brain-idea 2>/dev/null | sed 's|^\./||' || true)"
+    if [ -n "$is_git" ]; then
+      [ -z "$touched" ] || touched="$(git -C "$PROJECT_DIR" ls-files -co --exclude-standard 2>/dev/null | grep -xFf <(printf '%s\n' "$touched") || true)"
+      touched="$(printf '%s\n' "$touched" "$(comm -13 <(printf '%s\n' "$before") <(idea_changes) | cut -c4-)" | grep . | sort -u || true)"
+      [ "$(git -C "$PROJECT_DIR" rev-parse HEAD 2>/dev/null || true)" = "$head_before" ] \
+        || touched="${touched:+$touched$'\n'}new commits since ${head_before:0:8}: git -C $PROJECT_DIR log ${head_before:0:8}..HEAD"
+    fi
+    touched="$(printf '%s\n' "$touched" | head -20 || true)"
   fi
   unset -f idea_changes
   rm -f "$PDIR/.idea-running"; trap - EXIT INT TERM

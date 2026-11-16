@@ -51,6 +51,11 @@ cmd_idea open "$N" >/dev/null 2>&1
 has "$(cat "$P/$N/idea-error.txt")" "sneaked.c" "a file a thinking session wrote into the folder is reported"
 hasnt "$(cat "$P/$N/idea-error.txt")" "a.c" "what it cloned to learn from is not"
 hasnt "$(cat "$P/$N/idea-error.txt")" "b.c" "nor a throwaway experiment"
+mkdir -p app; echo x > app/old.c; git init -q . 2>/dev/null
+launch() { echo "$1|$5|${6:-}|$4" > "$T/launched"; echo y > app/old.c; }
+cmd_idea open "$N" >/dev/null 2>&1
+has "$(cat "$P/$N/idea-error.txt")" "app/old.c" "nor does a change hide inside a folder the repo has not committed yet"
+rm -rf .git app sneaked.c
 launch() { echo "$1|$5|${6:-}|$4" > "$T/launched"; echo "$2" > "$T/model"; }
 cmd_idea open "$N" >/dev/null 2>&1
 no "a clean session clears the report" test -e "$P/$N/idea-error.txt"
