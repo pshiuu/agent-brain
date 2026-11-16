@@ -57,6 +57,10 @@ console.log('egress: the policy and the keys')
 it('no allow line: everything but what is denied', () => {
   assert.equal(allowed('github.com', ''), true)
   assert.equal(allowed('pastebin.com', 'deny pastebin.com'), false)
+  assert.equal(allowed('github.com', 'allow host.docker.internal'), true, 'opening a host on this machine does not close the internet')
+  assert.equal(allowed('github.com', 'allow 192.168.1.5\nallow forward.localhost'), true)
+  assert.equal(allowed('github.com', 'allow host.docker.internal\nallow npmjs.org'), false)
+  assert.equal(allowed('host.docker.internal', 'allow host.docker.internal\nallow npmjs.org'), true)
   assert.equal(allowed('x.ngrok.io', 'deny *.ngrok.io'), false)
 })
 it('with allow lines: only those, and deny still wins', () => {

@@ -5,7 +5,8 @@
 // every request, so `brain secret set` or a policy change needs no restart:
 //
 //   CONNECT host:443 / GET http://host/…   egress, checked against policy (deny wins,
-//                                          then allow; with no allow line, all is allowed).
+//                                          then allow; with no allow line for an internet
+//                                          host, all is allowed).
 //                                          Never this machine or its network: a loopback,
 //                                          private or link-local address (the cockpit is one,
 //                                          at host.docker.internal) is refused unless an
@@ -44,8 +45,12 @@ export function allowed (host, policy = read('policy')) {
   const hit = pat => pat.startsWith('*.') ? host === pat.slice(2) || host.endsWith(pat.slice(1)) : host === pat
   if (rules.some(([k, p]) => k === 'deny' && hit(p))) return false
   const allows = rules.filter(([k]) => k === 'allow')
-  return !allows.length || allows.some(([, p]) => hit(p))
+  // An allow line for a name on this machine (an app's `allow host.docker.internal`) opens
+  // that one host; it does not turn the open internet into a list of one.
+  return !allows.some(([, p]) => !local(p)) || allows.some(([, p]) => hit(p))
 }
+/** A name that can only be this machine or its network: no allow line for one narrows the internet. */
+const local = h => { h = h.replace(/^\*\./, ''); return h === 'localhost' || /\.(localhost|internal|local)$/.test(h) || (isIP(h) !== 0 && inside(h)) }
 
 // ---- Codex on a ChatGPT subscription ------------------------------------------------
 const oauthFile = () => join(OAUTH, 'openai.json')
