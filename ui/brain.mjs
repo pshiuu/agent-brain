@@ -39,9 +39,14 @@ export function contractProblems (text) {
 const SAFE_ENV = /^[A-Za-z0-9._:/@+-]*$/
 
 // Claude documents its aliases in `claude --help`: fable, opus, sonnet (plus haiku),
-// or a full model name. Any string is allowed through, so a name not listed here still
-// works; these are suggestions, not a whitelist.
-const CLAUDE_MODELS = ['default', 'fable', 'opus', 'sonnet', 'haiku']
+// or a full model name. An alias is whatever is newest; a version is picked by its full
+// name, and those are the claude-* lines of system/prices.conf — the one list of models
+// this brain keeps, so a new model is one line there for the price and the picker both.
+// Any string is allowed through, so a name not listed here still works.
+const CLAUDE_ALIASES = ['default', 'fable', 'opus', 'sonnet', 'haiku']
+const claudeModels = () => [...CLAUDE_ALIASES.map(slug => ({ slug, description: slug === 'default' ? "claude's own configured default" : `the newest ${slug}` })),
+  ...(read(join(SYS, 'prices.conf')) || '').split('\n').map(l => l.trim().split(/\s+/)).filter(f => /^claude-[a-z0-9-]+$/.test(f[0]) && f.length >= 3)
+    .map(([slug, input, output]) => ({ slug, description: `$${input} in, $${output} out per million tokens` }))]
 const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] // claude --help
 // Used only when the codex catalog is not mounted.
 const CODEX_FALLBACK_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
@@ -111,9 +116,9 @@ export function models () {
   const codexEfforts = [...new Set(cat.models.flatMap(m => m.efforts))]
   return {
     claude: {
-      options: CLAUDE_MODELS.map(slug => ({ slug, label: slug, description: '', efforts: CLAUDE_EFFORTS })),
+      options: claudeModels().map(m => ({ ...m, label: m.slug, efforts: CLAUDE_EFFORTS })),
       efforts: CLAUDE_EFFORTS,
-      source: 'claude --help'
+      source: 'claude --help, versions from system/prices.conf'
     },
     codex: {
       options: [{ slug: 'default', label: 'default', description: "codex's own configured default", efforts: codexEfforts.length ? codexEfforts : CODEX_FALLBACK_EFFORTS }, ...cat.models],

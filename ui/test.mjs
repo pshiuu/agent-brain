@@ -1237,6 +1237,8 @@ console.log('engines: the agents in system/engines.conf, and the ones this brain
     assert.deepEqual([e.claude.on, e.codex.on, e.gemini.on], [true, false, true])
     assert.deepEqual(e.gemini.efforts, []); assert.equal(e.opencode.role, '.config/opencode/AGENTS.md')
     assert.ok(b.models().gemini, 'every agent has a model list, free text for the new ones')
+    const cl = b.models().claude.options.map(o => o.slug)
+    assert.ok(cl.includes('opus') && cl.some(m => /^claude-opus-\d/.test(m)) && cl.some(m => /^claude-fable-\d/.test(m)), 'Claude is offered by alias and by version, the versions from prices.conf')
     const conf = readFileSync(join(FIX, 'system/roles.conf'), 'utf8')
     writeFileSync(join(FIX, 'system/roles.conf'), conf + 'idle-codex  codex  default\n')
     assert.ok(b.lint().some(f => /runs on codex, which this brain has not installed: brain engine add codex/.test(f.msg)))
