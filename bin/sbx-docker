@@ -40,12 +40,31 @@ label() { docker inspect -f "{{index .Config.Labels \"$2\"}}" "$1" 2>/dev/null; 
 
 # The one container with a route out. Shared by every sandbox of this user, joined to
 # each sandbox's network under the name brain-egress.
+# Codex takes a ChatGPT backend only from an HTTPS origin, so the proxy also answers over
+# TLS with a certificate of this brain's own: made once, the CA's key thrown away, the
+# server's key in the store no sandbox mounts. A sandbox gets ca.pem, which is public.
+tls_up() {
+  local d="$ST/tls"; [ -s "$d/ca.pem" ] && [ -s "$d/cert.pem" ] && [ -s "$d/key.pem" ] && return 0
+  command -v openssl >/dev/null || die "openssl is missing: the egress proxy needs it once, for its certificate"
+  rm -rf "$d"; mkdir -p "$d" && chmod 700 "$d"
+  ( cd "$d" && umask 077
+    openssl ecparam -name prime256v1 -genkey -noout -out ca.key
+    openssl req -new -x509 -key ca.key -out ca.pem -days 3650 -subj "/CN=agent-brain egress CA"
+    openssl ecparam -name prime256v1 -genkey -noout -out key.pem
+    openssl req -new -key key.pem -out cert.csr -subj "/CN=brain-egress"
+    printf 'subjectAltName=DNS:brain-egress\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n' > ext
+    openssl x509 -req -in cert.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out cert.pem -days 3650 -extfile ext
+    rm -f ca.key ca.srl cert.csr ext ) >/dev/null 2>&1
+  [ -s "$d/cert.pem" ] || { rm -rf "$d"; die "could not make the egress proxy's certificate"; }
+  ! exists brain-egress || docker rm -f brain-egress >/dev/null   # it reads the certificate when it starts
+}
 egress_up() {
+  tls_up
   docker network inspect brain-egress-out >/dev/null 2>&1 || docker network create brain-egress-out >/dev/null
   # Recreated when it was made by an older version of this script (its label says which).
-  if exists brain-egress && [ "$(label brain-egress agent-brain.egress)" != 3 ]; then docker rm -f brain-egress >/dev/null; fi
+  if exists brain-egress && [ "$(label brain-egress agent-brain.egress)" != 4 ]; then docker rm -f brain-egress >/dev/null; fi
   if ! exists brain-egress; then
-    docker run -d --name brain-egress --restart unless-stopped --network brain-egress-out --label agent-brain.egress=3 \
+    docker run -d --name brain-egress --restart unless-stopped --network brain-egress-out --label agent-brain.egress=4 \
       --cap-drop ALL --security-opt no-new-privileges --read-only \
       -v "$HERE/docker:/app:ro" -v "$ST:/store:ro" -v "$ST/oauth:/oauth" "$NODE_IMG" node /app/egress.mjs >/dev/null \
       || die "could not start the egress proxy"
@@ -62,9 +81,10 @@ configure() { # name
   local c ws mcp; c="$(ctr "$1")"; ws="$(label "$c" agent-brain.workspace)"
   mcp="$(docker exec "$c" cat /home/agent/.brain-mcp 2>/dev/null | tr '\n' ' ')"
   local keys; keys="$(cd "$ST/secrets" && for k in anthropic openai google; do [ -s "$k" ] && printf '%s ' "$k"; done)"
-  docker exec -u agent -i "$c" sh -s -- "$ws" "$(claude_auth)" "$(codex_auth)" "$mcp" "$keys" <<'SH' >/dev/null 2>&1
-ws="$1"; cauth="$2"; xauth="$3"; mcp="$4"; keys="$5"
+  docker exec -u agent -i "$c" sh -s -- "$ws" "$(claude_auth)" "$(codex_auth)" "$mcp" "$keys" "$(cat "$ST/tls/ca.pem" 2>/dev/null)" <<'SH' >/dev/null 2>&1
+ws="$1"; cauth="$2"; xauth="$3"; mcp="$4"; keys="$5"; ca="$6"
 mkdir -p ~/.claude ~/.agents ~/.codex
+printf '%s\n' "$ca" > ~/.codex/brain-ca.pem
 for d in ~/.claude/skills ~/.agents/skills; do [ -e "$d" ] && [ ! -L "$d" ] || ln -sfn /opt/brain-skills "$d"; done
 node -e '
 const fs = require("fs"), H = process.env.HOME, [ws, akey, mcp] = process.argv.slice(1)
@@ -81,11 +101,13 @@ fs.writeFileSync(H + "/.claude/settings.json", JSON.stringify(s, null, 2))
 # Codex ignores OPENAI_BASE_URL. With an API key it reads openai_base_url; on a ChatGPT
 # subscription it talks to chatgpt.com, so a provider of our own sends that to the proxy
 # too, with the login it holds: placeholders the proxy hands out, the account's claims.
+# Over TLS (port 3129, the CA in ~/.codex/brain-ca.pem): Codex starts with an account check
+# and refuses a backend that is not an HTTPS origin.
 { if [ "$xauth" = oauth ]; then
-    printf 'model_provider = "brain"\nchatgpt_base_url = "http://brain-egress:3128/chatgpt"\n'
+    printf 'model_provider = "brain"\nchatgpt_base_url = "https://brain-egress:3129/chatgpt"\n'
   else printf 'openai_base_url = "http://brain-egress:3128/openai/v1"\n'; fi
   printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$ws"
-  [ "$xauth" != oauth ] || printf '\n[model_providers.brain]\nname = "ChatGPT via brain-egress"\nbase_url = "http://brain-egress:3128/chatgpt/codex"\nwire_api = "responses"\nrequires_openai_auth = true\n'
+  [ "$xauth" != oauth ] || printf '\n[model_providers.brain]\nname = "ChatGPT via brain-egress"\nbase_url = "https://brain-egress:3129/chatgpt/codex"\nwire_api = "responses"\nrequires_openai_auth = true\n'
   for n in $mcp; do printf '\n[mcp_servers.%s]\nurl = "http://brain-egress:3128/mcp/%s"\n' "$n" "$n"; done
 } > ~/.codex/config.toml
 case "$xauth" in
@@ -171,6 +193,7 @@ cmd_run() { # --name N -- args...
     -e GOOGLE_GEMINI_BASE_URL=http://brain-egress:3128/google)
   [ -s "$ST/secrets/google" ] && env+=(-e GEMINI_API_KEY=brain-egress)
   [ "$(claude_auth)" = oauth ] && env+=(-e CLAUDE_CODE_OAUTH_TOKEN=brain-egress)
+  [ "$agent" = codex ] && env+=(-e CODEX_CA_CERTIFICATE=/home/agent/.codex/brain-ca.pem)
   local t=-i; [ -t 0 ] && [ -t 1 ] && t=-it
   # The container outlives the agent (it is `sleep infinity`), so the last session to end
   # stops it, as an sbx VM stops: /exit, a closed window and a killed run all come through

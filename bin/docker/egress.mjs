@@ -26,10 +26,10 @@
 // The store is mounted read-only at /store: secrets/<name>, mcp/<name> ("url\nheader"),
 // policy ("allow host" / "deny host" lines, *.example.com for a domain and its subdomains).
 import { createServer, request as httpRequest } from 'node:http'
-import { request as httpsRequest } from 'node:https'
+import { request as httpsRequest, createServer as createTlsServer } from 'node:https'
 import { connect, isIP } from 'node:net'
 import { lookup as dnsLookup } from 'node:dns'
-import { readFileSync, writeFileSync, renameSync } from 'node:fs'
+import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 const STORE = process.env.STORE || '/store'
@@ -166,18 +166,20 @@ async function chatgpt (req, res) {
   } catch (e) { if (!res.headersSent) res.writeHead(502); res.end(`egress: ${e.message}\n`) }
 }
 
+/** One request to the proxy: an engine's route, or a plain-HTTP page on its way out. */
+export function handle (req, res) {
+  if (/^\/(chatgpt(\/|$)|openai-oauth\/(token|placeholder))/.test(req.url)) return chatgpt(req, res)
+  if (req.url.startsWith('/')) {
+    const r = route(req.url)
+    if (!r) { res.writeHead(404); return res.end('egress: no such route\n') }
+    return forward(req, res, r.url, r.set, r.drop)
+  }
+  let u; try { u = new URL(req.url) } catch { res.writeHead(400); return res.end('egress: bad request\n') }
+  if (!allowed(u.hostname) || literalInside(u.hostname)) { res.writeHead(403); return res.end(`egress: ${u.hostname} is not allowed by the brain's network policy\n`) }
+  forward(req, res, req.url, {}, [], true)
+}
 export function server () {
-  const s = createServer((req, res) => {
-    if (/^\/(chatgpt(\/|$)|openai-oauth\/(token|placeholder))/.test(req.url)) return chatgpt(req, res)
-    if (req.url.startsWith('/')) {
-      const r = route(req.url)
-      if (!r) { res.writeHead(404); return res.end('egress: no such route\n') }
-      return forward(req, res, r.url, r.set, r.drop)
-    }
-    let u; try { u = new URL(req.url) } catch { res.writeHead(400); return res.end('egress: bad request\n') }
-    if (!allowed(u.hostname) || literalInside(u.hostname)) { res.writeHead(403); return res.end(`egress: ${u.hostname} is not allowed by the brain's network policy\n`) }
-    forward(req, res, req.url, {}, [], true)
-  })
+  const s = createServer(handle)
   s.on('connect', (req, sock, head) => {
     sock.on('error', () => sock.destroy())
     const [host, port = '443'] = req.url.split(/:(?=\d+$)/)
@@ -193,4 +195,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // Every sandbox's only way out: one connection that breaks oddly must not take it down.
   process.on('uncaughtException', e => console.error(`egress: ${e.code || ''} ${e.message}`))
   server().listen(Number(process.env.PORT || 3128), '0.0.0.0', () => console.log('egress listening on 3128'))
+  // The same routes over TLS, for Codex: it refuses a ChatGPT backend that is not an HTTPS
+  // origin. The certificate is this brain's own (bin/sbx-docker makes it; a sandbox gets the CA).
+  const tls = join(STORE, 'tls')
+  if (existsSync(join(tls, 'key.pem'))) createTlsServer({ key: readFileSync(join(tls, 'key.pem')), cert: readFileSync(join(tls, 'cert.pem')) }, handle)
+    .on('clientError', (e, sock) => sock.destroy()).listen(3129, '0.0.0.0', () => console.log('egress listening on 3129 (tls)'))
 }
