@@ -743,13 +743,15 @@ function newIdeaCard () {
   const dir = keep(document.createElement('input')); dir.type = 'text'; dir.setAttribute('aria-label', 'Folder you already work in')
   dir.placeholder = `Already started? Its folder, e.g. ${S.hostDev.replace(/^\/Users\/[^/]+/, '~')}/fm1-firmware (optional)`
   dir.style.width = '100%'; dir.style.marginTop = '8px'
+  // The agent the first talk runs on; "Just save" starts none, so it ignores this.
+  const agent = ideaAgentPicker(), pick = $('div', 'bar'); pick.append(...agent.nodes); pick.style.marginTop = '8px'
   const bar = $('div', 'bar'), talk = btn('primary', 'chat-circle-dots', 'Save and start talking'), save = btn('', 'floppy-disk', 'Just save')
   const go = open => async () => {
     const t = text.value.trim()
     if (!t) return toast('Write the idea down first.')
     talk.disabled = save.disabled = true
     try {
-      const r = await api('/api/idea', { method: 'POST', body: { text: t, open, dir: dir.value } })
+      const r = await api('/api/idea', { method: 'POST', body: { text: t, open, dir: dir.value, ...(open ? agent.value() : {}) } })
       delete text.dataset.keep; delete dir.dataset.keep; text.value = dir.value = ''
       toast(!open ? 'Written down.' : r.watching ? 'Written down. A Terminal window opens on the Mac to talk about it.' : 'Written down. The talk starts as soon as the helper runs.')
       await refresh(); render()
@@ -757,7 +759,7 @@ function newIdeaCard () {
   }
   talk.onclick = go(true); save.onclick = go(false)
   bar.append(talk, save)
-  return card('A new idea', 'No brief and no plan needed. The agent asks, looks things up and keeps the note.', null, pad(text, dir, bar))
+  return card('A new idea', 'No brief and no plan needed. The agent asks, looks things up and keeps the note.', null, pad(text, dir, pick, bar))
 }
 function ideasView () {
   const rows = S.ideas.map(i => {
@@ -784,7 +786,7 @@ function ideasView () {
    two are different roles, so they can be different models; the choice here is for this
    one session and is remembered in this browser. */
 const IDEA_AGENT = 'brain-idea-agent'
-function ideaWorkCard (i) {
+function ideaAgentPicker (last) { // -> { nodes, value(): { engine, model, effort }, remembered in this browser }
   const role = S.roles.find(r => r.role === 'idea-partner') || {}
   const engines = S.engines.filter(e => e.on)
   let saved = {}; try { saved = JSON.parse(localStorage.getItem(IDEA_AGENT) || '{}') } catch {}
@@ -793,7 +795,7 @@ function ideaWorkCard (i) {
     for (const [v, t] of opts) el.append(Object.assign(document.createElement('option'), { value: v, textContent: t, selected: v === value }))
     return el
   }
-  const start = engines.some(e => e.name === saved.engine) ? saved.engine : engines.some(e => e.name === i.last) ? i.last : role.engine || engines[0]?.name || ''
+  const start = engines.some(e => e.name === saved.engine) ? saved.engine : engines.some(e => e.name === last) ? last : role.engine || engines[0]?.name || ''
   const engine = sel('Agent', engines.map(e => [e.name, e.label]), start), slot = $('span'); slot.style.display = 'contents'
   let model, effort
   const fill = () => {
@@ -807,17 +809,24 @@ function ideaWorkCard (i) {
   }
   engine.onchange = () => { saved = {}; fill() }
   fill()
+  return { nodes: [engine, slot], value: () => {
+    const v = { engine: engine.value, model: model.value, effort: effort.value }
+    try { localStorage.setItem(IDEA_AGENT, JSON.stringify(v)) } catch {}
+    return v
+  } }
+}
+function ideaWorkCard (i) {
+  const agent = ideaAgentPicker(i.last)
   const busy = !!(i.running || i.opening || i.ending), hasPlan = !!i.plan.trim()
   const talk = btn(hasPlan ? '' : 'primary', 'chat-circle-dots', 'Talk it through'), build = btn(hasPlan ? 'primary' : '', 'hammer', 'Build the plan')
   talk.disabled = busy; build.disabled = busy || !hasPlan
   if (!hasPlan) build.title = 'There is no plan yet. Talk it through first: the talk ends with one.'
   const go = action => () => {
     talk.disabled = build.disabled = true
-    try { localStorage.setItem(IDEA_AGENT, JSON.stringify({ engine: engine.value, model: model.value, effort: effort.value })) } catch {}
-    ideaAsk({ name: i.name, action, engine: engine.value, model: model.value, effort: effort.value }, 'A Terminal window opens on the Mac.')
+    ideaAsk({ name: i.name, action, ...agent.value() }, 'A Terminal window opens on the Mac.')
   }
   talk.onclick = go('open'); build.onclick = go('build')
-  const pick = $('div', 'bar'), acts = $('div', 'bar'); pick.append(engine, slot); acts.append(talk, build)
+  const pick = $('div', 'bar'), acts = $('div', 'bar'); pick.append(...agent.nodes); acts.append(talk, build)
   const sub = i.running ? `Open in a Terminal window on the Mac: ${i.running === 'build' ? 'the plan is being built' : 'being talked through'}. It is a chat: it waits for your answer there, ${hasPlan ? 'and' : 'writes the plan once you agree to one, and'} stays open until you type /exit.`
     : hasPlan ? 'There is a plan. Build it, with the same agent or another, or talk it through again to change it.'
       : 'Talking asks, researches and plans, and changes nothing in the folder. Building comes after, from the plan.'

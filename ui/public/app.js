@@ -2475,6 +2475,37 @@ function decisionAppender (p) {
   return box
 }
 
+/* ---------- settings ----------
+   This brain's own settings (system/brain.local.conf). The cockpit writes none of system/:
+   Save stages memory/.settings-request and brain watch writes the file. */
+function settingsView () {
+  const box = $('div'), head = $('div', 'head'), rows = $('div', 'rows'), get = {}
+  head.append($('h1', '', 'Settings'), $('p', 'sub', 'How this brain runs on this Mac. Kept in system/brain.local.conf, which an update of the base leaves alone.'))
+  box.append(head)
+  for (const st of S.settings.items) {
+    const r = $('div', 'row'), l = document.createElement('label'), el = document.createElement(st.options ? 'select' : 'input')
+    l.style.display = 'flex'; l.style.gap = '7px'; l.style.alignItems = 'baseline'
+    if (st.options) for (const o of st.options) el.append(Object.assign(document.createElement('option'), { value: o, textContent: o, selected: o === st.value }))
+    else Object.assign(el, { type: 'number', min: 0, value: st.value })
+    el.disabled = st.fixed
+    if (!st.fixed) get[st.key] = () => el.value === st.value ? null : el.value
+    l.append($('span', 'name', st.label), el)
+    r.append(l, $('p', 'sub', st.fixed ? `${st.hint} Set by the environment (${st.key}), which wins.` : st.hint)); rows.append(r)
+  }
+  const act = $('div', 'bar'), save = $('button', 'primary', 'Save'), note = $('span', 'tag')
+  if (S.settings.pending) { save.disabled = true; note.textContent = S.watching ? 'being saved' : 'saved as soon as brain watch runs' }
+  save.onclick = async () => {
+    const values = Object.fromEntries(Object.entries(get).map(([k, f]) => [k, f()]).filter(([, v]) => v !== null))
+    save.disabled = true
+    try {
+      await api('/api/settings', { method: 'POST', body: { values } })
+      S = await api('/api/state'); render()
+    } catch (e) { note.className = 'tag err'; note.textContent = e.message; save.disabled = false }
+  }
+  act.append(save, note); box.append(rows, act)
+  return box
+}
+
 /* ---------- router ---------- */
 
 // Grouped by where the thing lives: system/ is what agents run, memory/ what they know.
@@ -2484,7 +2515,8 @@ const NAV = [
     ['playbooks', 'Playbooks', 'book-open-text', () => S.playbooks.length],
     ['roles', 'Roles', 'robot', () => S.roles.length],
     ['skills', 'Skills', 'puzzle-piece', () => S.skills.declared.length],
-    ['apps', 'Apps', 'squares-four', () => S.apps.length]]],
+    ['apps', 'Apps', 'squares-four', () => S.apps.length],
+    ['settings', 'Settings', 'sliders-horizontal', () => '']]],
   // A function, read on every render: Clients is the clients app's, so it shows only with it.
   ['Knowledge', () => [
     ['memory', 'Memory', 'brain', () => ''],
@@ -2546,7 +2578,7 @@ function render (opts) {
   view.textContent = ''
   const routes = {
     '': dashboard, playbooks: playbooksView, roles: rolesView, skills: skillsView,
-    memory: memoryView, clients: clientsView,
+    memory: memoryView, clients: clientsView, settings: settingsView,
     app: () => { location.replace(`#/apps/${arg}`); return $('div') },
     apps: () => appsView(decodeURIComponent(arg)),
     playbook: () => playbookView(decodeURIComponent(arg)),

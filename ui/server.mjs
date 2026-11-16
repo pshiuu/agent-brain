@@ -202,6 +202,7 @@ const routes = {
   'POST /api/app-settings': ({ b }) => brain.saveAppSettings(b),
   'POST /api/apps': ({ b }) => brain.requestApps(b),
   'POST /api/base-update': () => brain.requestBaseUpdate(),
+  'POST /api/settings': ({ b }) => brain.saveSettings(b),
   'GET /api/app-readme': ({ q }) => brain.appReadme(q.get('name')),
   'POST /api/evolve': ({ b }) => brain.requestEvolve(b.playbook || ''),
   'POST /api/analyse': ({ b }) => brain.requestAnalysis(b.playbook),

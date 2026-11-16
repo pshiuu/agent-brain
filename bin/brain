@@ -2842,7 +2842,12 @@ idea_studio_new() { # slug stage-dir
   fi
   info "writing down the idea $slug"
   (BRAIN_NONINTERACTIVE=1 idea_new "$text" --name "$slug" ${dir:+--dir "$dir"}) > "$st/log" 2>&1 || return 1
-  [ ! -f "$st/open.md" ] || echo open > "$MEM/projects/$slug/.idea-request"
+  # open.md is the wish to start talking, and may name the agent for it: `open <engine>
+  # <model> <effort>`, each `-` for the role's own. idea_watch checks every word of it.
+  [ -f "$st/open.md" ] || return 0
+  local ask; ask="$(head -1 "$st/open.md" | tr -d '\r')"
+  [[ "$ask" =~ ^open(\ [A-Za-z0-9._:/-]+){3}$ ]] || ask=open
+  echo "$ask" > "$MEM/projects/$slug/.idea-request"
 }
 
 # The launcher deleted an idea's record (brain idea rm, brain project rm, the Studio). Its
@@ -3091,6 +3096,9 @@ cmd_watch() {
         terminal "$BRAIN" "$want"
       fi
     fi
+    if [ -f "$MEM/.settings-request" ]; then
+      settings_request "$MEM/.settings-request"; rm -f "$MEM/.settings-request"
+    fi
     # The Studio's Apps page, in the background: a clone can take a while.
     if [ -f "$MEM/.apps-request" ] && [ ! -f "$MEM/.apps-running" ]; then
       mv "$MEM/.apps-request" "$MEM/.apps-running"
@@ -3120,7 +3128,18 @@ terminal() { # dir command -> a new Terminal window running it there, closed whe
   # set as well as PATH because BRAIN wins in bin/brain, and a Terminal that a watcher
   # started carries that watcher's BRAIN into every window — so osascript, which starts
   # Terminal when it is not running, is given neither BRAIN nor DEV_DIR to pass on.
-  local wid
+  local wid line="export BRAIN=$(printf %q "$BRAIN") DEV_DIR=$(printf %q "$DEV") PATH=$(printf %q "$BRAIN/bin"):\$PATH && cd $(printf %q "$1") && $2 && exit"
+  # BRAIN_TERMINAL=cmux: a cmux workspace instead, which closes on its own when its shell
+  # exits and stays when the command failed — the same contract. Read on every call, so the
+  # Settings page takes effect without restarting the watcher. cmux answers only processes
+  # started inside it unless its socketControlMode says otherwise; when it does not answer,
+  # the run still gets a window: Terminal's.
+  if [ "${BRAIN_TERMINAL:-$(setting BRAIN_TERMINAL terminal)}" = cmux ]; then
+    local cmux; cmux="$(command -v cmux || echo /Applications/cmux.app/Contents/Resources/bin/cmux)"
+    CMUX_QUIET=1 "$cmux" ping >/dev/null 2>&1 || { open -a cmux 2>/dev/null && sleep 3; }
+    if CMUX_QUIET=1 "$cmux" new-workspace --name "$2" --cwd "$1" --command "$line" --focus true >/dev/null 2>&1; then return 0; fi
+    info "cmux did not take the window (not running, or its socket only answers its own terminals: run brain watch inside cmux, or open its socketControlMode) — using Terminal"
+  fi
   wid="$(env -u BRAIN -u DEV_DIR osascript 2>/dev/null <<OSA
 tell application "Terminal"
   set t to do script "export BRAIN=" & quoted form of "$BRAIN" & " DEV_DIR=" & quoted form of "$DEV" & " PATH=" & quoted form of "$BRAIN/bin" & ":\$PATH && cd " & quoted form of "$1" & " && $2 && exit"
@@ -3855,6 +3874,25 @@ cmd_engine() {
       info "removed $1. Its image stays until: docker image rm brain-$1:$TPL_VERSION" ;;
     *) die "usage: brain engine [ls | add <name>… | remove <name>]" ;;
   esac
+}
+
+# The cockpit's Settings page: memory/.settings-request is KEY=value lines. Only the keys
+# named here, each with a value of its own shape — the cockpit has no login, so nothing
+# that is a command (BRAIN_NOTIFY) or a path is settable from it. ui/brain.mjs SETTINGS
+# is the same list with its labels; ui/test.mjs holds the two together.
+settings_request() { # file
+  local k v
+  while IFS='=' read -r k v || [ -n "$k" ]; do
+    case "$k" in
+      BRAIN_TERMINAL) [[ "$v" =~ ^(terminal|cmux)$ ]] || k="" ;;
+      BRAIN_MAX_PARALLEL|BRAIN_PHASE_TIMEOUT|BRAIN_MAX_RUNS|BRAIN_MAX_FIX_LOOPS) [[ "$v" =~ ^[0-9]{1,6}$ ]] || k="" ;;
+      *) k="" ;;
+    esac
+    [ -n "$k" ] || { info "settings: a line the Settings page may not set — ignored"; continue; }
+    set_setting "$k" "$v"; info "settings: $k=$v"
+  done < "$1"
+  # The one this long-running watcher holds itself; the rest are read by each run.
+  MAX_PARALLEL="${BRAIN_MAX_PARALLEL:-$(setting BRAIN_MAX_PARALLEL 3)}"
 }
 
 # A setting of this brain's own (system/brain.local.conf), from a script: install.sh uses it.

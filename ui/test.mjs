@@ -964,6 +964,19 @@ it('archives a client, restores it, and deletes one for good, never under an unf
   b.deleteClient({ archived: second, confirm: 'oldco' })
   assert.deepEqual(b.archivedClients(), [])
 })
+it('stages the Settings page as a request, with only the keys bin/brain accepts', () => {
+  const sh = readFileSync(join(REPO, 'bin/brain'), 'utf8').match(/^settings_request\(\)[\s\S]*?^}/m)[0]
+  for (const s of b.SETTINGS) assert.ok(sh.includes(s.key), `settings_request knows ${s.key}`)
+  throws(() => b.saveSettings({ values: { BRAIN_NOTIFY: 'rm -rf /' } }), /not a setting/)
+  throws(() => b.saveSettings({ values: { BRAIN_TERMINAL: 'iterm' } }), /one of/)
+  throws(() => b.saveSettings({ values: { BRAIN_MAX_PARALLEL: '2; id' } }), /whole number/)
+  b.saveSettings({ values: { BRAIN_TERMINAL: 'cmux', BRAIN_MAX_PARALLEL: 5 } })
+  const f = join(FIX, 'memory/.settings-request')
+  try {
+    assert.equal(readFileSync(f, 'utf8'), 'BRAIN_TERMINAL=cmux\nBRAIN_MAX_PARALLEL=5\n')
+    assert.ok(b.settings().pending)
+  } finally { rmSync(f, { force: true }) }
+})
 it('writes an idea down, lists it apart from the projects, and stages its session and promotion', () => {
   const r = b.createIdea({ text: 'Custom firmware for the M-Wave FM1 synth\nhttps://example.com/manual', open: true })
   const slug = 'custom-firmware-for-the-m-wave-fm1-synth', st = join(FIX, 'memory/.new', slug), pdir = join(FIX, 'memory/projects', slug)
@@ -971,7 +984,11 @@ it('writes an idea down, lists it apart from the projects, and stages its sessio
     assert.equal(r.idea, slug, 'named for its first line')
     assert.equal(readFileSync(join(st, 'request'), 'utf8'), `idea ${slug}\n`)
     assert.match(readFileSync(join(st, 'text.md'), 'utf8'), /example\.com\/manual/, 'the whole text, links and all')
-    assert.ok(existsSync(join(st, 'open.md')), 'and the wish to start talking')
+    assert.equal(readFileSync(join(st, 'open.md'), 'utf8'), 'open - - -\n', 'and the wish to start talking, on the role\'s own agent')
+    throws(() => b.createIdea({ text: 'another idea entirely', open: true, engine: 'nosuch' }), /no agent/)
+    b.createIdea({ text: 'another idea entirely', open: true, engine: 'claude', model: 'sonnet', effort: 'high' })
+    assert.equal(readFileSync(join(FIX, 'memory/.new/another-idea-entirely/open.md'), 'utf8'), 'open claude sonnet high\n', 'or on the one the form named')
+    rmSync(join(FIX, 'memory/.new/another-idea-entirely'), { recursive: true })
     throws(() => b.createIdea({ text: 'Custom firmware for the M-Wave FM1 synth' }), /already being written down/)
     throws(() => b.createIdea({ text: '   ' }), /write the idea down first/)
     throws(() => b.createIdea({ text: 'elsewhere it is', dir: '/etc' }), /has to be inside/)

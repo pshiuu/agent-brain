@@ -647,7 +647,8 @@ export function ideas () {
 /** Write an idea down: its text is the whole request. `open` asks to start talking right
  *  away. `dir` is a folder the human already works in — under ~/dev only, the part of
  *  the Mac the cockpit sees: what is named here gets mounted into a sandbox. */
-export function createIdea ({ text, open, dir }) {
+export function createIdea ({ text, open, dir, engine = '', model = '', effort = '' }) {
+  if (open) ideaAgent(engine, model, effort)
   const t = String(text || '').trim(), slug = ideaSlug(t)
   if (!PLAYBOOK_NAME.test(slug)) throw new HttpError(400, 'write the idea down first: a line is enough')
   if (existsSync(join(MEM, 'projects', slug, 'project.env'))) throw new HttpError(409, `'${slug}' exists already — carry on there, or start this one with other words`)
@@ -667,7 +668,7 @@ export function createIdea ({ text, open, dir }) {
   mkdirSync(st, { recursive: true })
   writeAtomic(join(st, 'text.md'), t)
   if (folder) writeAtomic(join(st, 'dir.md'), folder)
-  if (open) writeAtomic(join(st, 'open.md'), 'open')
+  if (open) writeAtomic(join(st, 'open.md'), `open ${engine || '-'} ${model || '-'} ${effort || '-'}\n`)
   writeAtomic(join(st, 'request'), `idea ${slug}\n`)
   return { queued: true, idea: slug, watching: watching() }
 }
@@ -675,16 +676,19 @@ export function createIdea ({ text, open, dir }) {
  *  the host, on `engine` / `model` / `effort` when given and the role's own otherwise; or
  *  promote (to `playbook`). Everything named here ends up in a command line. */
 const WORD = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$/
+function ideaAgent (engine, model, effort) {
+  const e = engines().find(x => x.name === engine)
+  if (engine && !e?.on) throw new HttpError(400, `this brain has no agent '${engine}'`)
+  if (model && !WORD.test(model)) throw new HttpError(400, `'${model}' is not a model name`)
+  if (effort && !(e ? e.efforts : []).includes(effort)) throw new HttpError(400, `'${effort}' is not an effort ${engine || 'that agent'} has`)
+  if ((model || effort) && !engine) throw new HttpError(400, 'a model or an effort needs its agent named')
+}
 export function requestIdea ({ name, action, playbook, engine = '', model = '', effort = '' }) {
   const dir = ideaDir(name)
   if (existsSync(join(dir, '.idea-request'))) throw new HttpError(409, 'already asked for — it happens within seconds while brain watch runs')
   if (action === 'open' || action === 'build') {
     if (action === 'build' && !(read(join(dir, 'plan.md')) || '').trim()) throw new HttpError(400, 'there is no plan yet — talk it through first: building starts from the plan')
-    const e = engines().find(x => x.name === engine)
-    if (engine && !e?.on) throw new HttpError(400, `this brain has no agent '${engine}'`)
-    if (model && !WORD.test(model)) throw new HttpError(400, `'${model}' is not a model name`)
-    if (effort && !(e ? e.efforts : []).includes(effort)) throw new HttpError(400, `'${effort}' is not an effort ${engine || 'that agent'} has`)
-    if ((model || effort) && !engine) throw new HttpError(400, 'a model or an effort needs its agent named')
+    ideaAgent(engine, model, effort)
     writeAtomic(join(dir, '.idea-request'), `${action} ${engine || '-'} ${model || '-'} ${effort || '-'}\n`)
   } else if (action === 'promote') {
     if (!PLAYBOOK_NAME.test(String(playbook || '')) || !existsSync(join(playbookDir(playbook), 'phases'))) throw new HttpError(400, `no playbook '${playbook}'`)
@@ -2263,6 +2267,33 @@ function setting (key, dflt) {
   return dflt
 }
 
+/** What the Admin's Settings page may change: this brain's own system/brain.local.conf, by
+ *  way of memory/.settings-request, which brain watch (settings_request in bin/brain, the
+ *  same keys) writes. Nothing that is a command or a path: the cockpit has no login. */
+export const SETTINGS = [
+  { key: 'BRAIN_TERMINAL', label: 'Terminal', hint: 'What a run opens in on the Mac. cmux has to let the helper in: start brain watch inside cmux, or open its socketControlMode. If it does not answer, Terminal is used.', options: ['terminal', 'cmux'], dflt: 'terminal' },
+  { key: 'BRAIN_MAX_PARALLEL', label: 'Runs at once', hint: 'How many projects and ideas run side by side; the rest wait. 0 is no limit.', dflt: '3' },
+  { key: 'BRAIN_PHASE_TIMEOUT', label: 'Phase timeout', hint: 'Seconds a phase may run without writing its handoff. 0 is off.', dflt: '0' },
+  { key: 'BRAIN_MAX_RUNS', label: 'Runs per brain auto', hint: 'Agent runs one brain auto may take, as a backstop. 0 is off.', dflt: '50' },
+  { key: 'BRAIN_MAX_FIX_LOOPS', label: 'Fix rounds', hint: 'FAIL rounds a review phase may take before it stops and asks.', dflt: '3' }
+]
+export const settings = () => ({
+  pending: existsSync(join(MEM, '.settings-request')),
+  // What the environment sets, nothing here can change: it beats both files.
+  items: SETTINGS.map(s => ({ ...s, value: setting(s.key, s.dflt), fixed: !!process.env[s.key] }))
+})
+export function saveSettings ({ values }) {
+  const lines = Object.entries(values || {}).map(([k, v]) => {
+    const s = SETTINGS.find(x => x.key === k), val = String(v).trim()
+    if (!s) throw new HttpError(400, `'${k}' is not a setting this page changes`)
+    if (s.options ? !s.options.includes(val) : !/^[0-9]{1,6}$/.test(val)) throw new HttpError(400, `${s.label}: ${s.options ? `one of ${s.options.join(', ')}` : 'a whole number'}`)
+    return `${k}=${val}`
+  })
+  if (!lines.length) throw new HttpError(400, 'nothing changed')
+  writeAtomic(join(MEM, '.settings-request'), lines.join('\n') + '\n')
+  return { ok: true, watching: watching() }
+}
+
 /** The questions a playbook's brief asks: every `##` heading (### included, as bin/brain
  *  brief_sections does), with the HTML comment under it as the hint fill_brief shows. */
 function briefSections (text) {
@@ -2672,6 +2703,7 @@ export function state () {
   return {
     playbooks: playbooks(), apps: apps(), store: appStore(), base: baseUpdate(), engines: engines(), usage: usage(), clientsOn: clientsOn(), roles: roles(), skills: skills(), sandbox: sandbox(), projects: projects(), ideas: ideas(), archivedProjects: archivedProjects(), clients: clients(), archivedClients: archivedClients(), knowledge: knowledge(), proposals: proposals(read(join(MEM, 'proposals.md'))), examples: examples(), sources: sources(), lint: lint(), models: models(), maxFixLoops: MAX_FIX_LOOPS, hostBrain: HOST_BRAIN, hostDev: HOST_DEV, watching: watching(), evolvePending: existsSync(join(MEM, '.evolve-request')),
     maxParallel: Number(setting('BRAIN_MAX_PARALLEL', 3)) || 0,
+    settings: settings(),
     pending: { new: pendingProjects(), drafts: drafts(), draft: (read(join(MEM, '.draft-request')) || '').trim() || null, commit: existsSync(join(MEM, '.commit-request')) }
   }
 }

@@ -81,6 +81,18 @@ watch_new >/dev/null 2>&1
 no "the staged request is taken" test -e "$MEM/.new/fresh-one"
 has "$(cat "$P/fresh-one/brief.md")" "with a second line" "the form's text is the idea"
 is "$(cat "$P/fresh-one/.idea-request")" "open" "and it asked to start talking"
+for pair in "with-agent|open codex gpt-5.5 high|open codex gpt-5.5 high" "with-junk|open x; rm -rf /|open"; do
+  n="${pair%%|*}"; rest="${pair#*|}"
+  mkdir -p "$MEM/.new/$n"; echo "idea $n" > "$MEM/.new/$n/text.md"; echo "${rest%%|*}" > "$MEM/.new/$n/open.md"
+  idea_studio_new "$n" "$MEM/.new/$n" >/dev/null 2>&1
+  is "$(cat "$P/$n/.idea-request")" "${rest#*|}" "the first talk's agent is passed on, and only as plain words ($n)"
+  rm -rf "$P/$n" "$MEM/.new/$n"
+done
+printf 'BRAIN_TERMINAL=cmux\nBRAIN_MAX_PARALLEL=5\nBRAIN_NOTIFY=rm -rf /\nBRAIN_TERMINAL=$(id)\n' > "$MEM/.settings-request"
+( info() { :; }; settings_request "$MEM/.settings-request"; echo "$MAX_PARALLEL" > "$T/par" ); rm "$MEM/.settings-request"
+is "$(setting BRAIN_TERMINAL x) $(setting BRAIN_MAX_PARALLEL x) $(cat "$T/par")" "cmux 5 5" "the Settings page sets what it may, and the watcher's own cap follows"
+is "$(setting BRAIN_NOTIFY none)" "none" "and never a command"
+rm -f "$SYS/brain.local.conf"
 LAUNCHED=""; terminal() { LAUNCHED="$2"; }; MAX_PARALLEL=0; info() { :; }
 idea_watch
 is "$LAUNCHED" "brain idea open fresh-one" "the watcher opens the session in a Terminal"

@@ -18,7 +18,7 @@ at this level or above.
   installs the result after the human sees it.
 - **The cockpit never runs a host command.** It stages a request file under `memory/`
   (`.new/<slug>/`, `<project>/.run-request`, `<project>/.end-request`, `.draft-request`, `.evolve-request`, `.update-request`,
-  `.commit-request`, `.apps-request`, an idea's `<project>/.idea-request`; an app's Studio code `<project>/.<app>-request`, `inbox/` and
+  `.commit-request`, `.apps-request`, `.settings-request`, an idea's `<project>/.idea-request`; an app's Studio code `<project>/.<app>-request`, `inbox/` and
   `<name>.staged` through `/api/app-request`) and `brain watch` acts on it, at most
   `BRAIN_MAX_PARALLEL` runs at once. A new kind of button means a new request file and a new `case` in `cmd_watch`,
   never a shell in the container. The install of a draft is the one place the cockpit
