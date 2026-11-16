@@ -19,7 +19,7 @@ const tokenSrv = createServer((q, s) => { let b = ''; q.on('data', d => { b += d
 await new Promise(ok => tokenSrv.on('listening', ok))
 process.env.OPENAI_TOKEN_URL = `http://127.0.0.1:${tokenSrv.address().port}/oauth/token`
 const { rewrite } = await import('../bin/docker/stack.mjs')
-const { allowed, route, server, inside, chatgptTokens, placeholderJwt } = await import('../bin/docker/egress.mjs')
+const { allowed, route, server, inside, chatgptTokens, placeholderJwt, chatgptUrl } = await import('../bin/docker/egress.mjs')
 let n = 0
 const it = (name, fn) => { fn(); n++; console.log(`  ok  ${name}`) }
 
@@ -104,6 +104,11 @@ it('what Codex holds instead keeps the claims and no signature', () => {
   const c = JSON.parse(Buffer.from(p.split('.')[1], 'base64url'))
   assert.equal(c.email, 'me@x'); assert.equal(c['https://api.openai.com/auth'].chatgpt_plan_type, 'plus')
   assert.equal(JSON.parse(Buffer.from(p.split('.')[0], 'base64url')).alg, 'none')
+})
+it('Codex\'s account check reaches ChatGPT under the name ChatGPT has for it', () => {
+  assert.equal(chatgptUrl('/chatgpt/api/codex/accounts/check'), 'https://chatgpt.com/backend-api/wham/accounts/check')
+  assert.equal(chatgptUrl('/chatgpt/wham/usage'), 'https://chatgpt.com/backend-api/wham/usage')
+  assert.equal(chatgptUrl('/chatgpt/codex/responses'), 'https://chatgpt.com/backend-api/codex/responses')
 })
 tokenSrv.close()
 

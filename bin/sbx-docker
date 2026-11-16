@@ -43,9 +43,9 @@ label() { docker inspect -f "{{index .Config.Labels \"$2\"}}" "$1" 2>/dev/null; 
 egress_up() {
   docker network inspect brain-egress-out >/dev/null 2>&1 || docker network create brain-egress-out >/dev/null
   # Recreated when it was made by an older version of this script (its label says which).
-  if exists brain-egress && [ "$(label brain-egress agent-brain.egress)" != 2 ]; then docker rm -f brain-egress >/dev/null; fi
+  if exists brain-egress && [ "$(label brain-egress agent-brain.egress)" != 3 ]; then docker rm -f brain-egress >/dev/null; fi
   if ! exists brain-egress; then
-    docker run -d --name brain-egress --restart unless-stopped --network brain-egress-out --label agent-brain.egress=2 \
+    docker run -d --name brain-egress --restart unless-stopped --network brain-egress-out --label agent-brain.egress=3 \
       --cap-drop ALL --security-opt no-new-privileges --read-only \
       -v "$HERE/docker:/app:ro" -v "$ST:/store:ro" -v "$ST/oauth:/oauth" "$NODE_IMG" node /app/egress.mjs >/dev/null \
       || die "could not start the egress proxy"

@@ -137,6 +137,11 @@ function forward (req, res, target, set = {}, drop = [], guard = false) {
   req.pipe(out)
 }
 
+/** Where a /chatgpt/… request goes. Codex names its account endpoints /wham/… only when
+ *  its base URL says backend-api; behind this proxy it asks for /api/codex/… instead, the
+ *  same endpoints by their other name, and the account check it starts with must answer. */
+export const chatgptUrl = url => 'https://chatgpt.com/backend-api' + url.replace(/^\/chatgpt/, '').replace(/^\/api\/codex\//, '/wham/')
+
 async function chatgpt (req, res) {
   try {
     // The auth.json a sandbox's Codex gets: the account's claims, placeholder tokens.
@@ -157,7 +162,7 @@ async function chatgpt (req, res) {
     if (!t) { res.writeHead(401); return res.end('egress: not signed in to ChatGPT — brain secret set openai --oauth\n') }
     const set = { authorization: `Bearer ${t.access_token}` }
     if (t.account_id) set['chatgpt-account-id'] = t.account_id
-    forward(req, res, 'https://chatgpt.com/backend-api' + req.url.replace(/^\/chatgpt/, ''), set)
+    forward(req, res, chatgptUrl(req.url), set)
   } catch (e) { if (!res.headersSent) res.writeHead(502); res.end(`egress: ${e.message}\n`) }
 }
 
